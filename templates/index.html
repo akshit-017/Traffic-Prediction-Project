@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proactive Traffic Prediction & Optimization</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar for Controls -->
+        <aside class="glass-panel sidebar">
+            <header>
+                <h1>AI Traffic Optimizer</h1>
+                <p>Predictive routing powered by Random Forest</p>
+            </header>
+            
+            <form id="route-form">
+                <div class="form-group">
+                    <label for="source">Source Intersection:</label>
+                    <select id="source" name="source" required>
+                        <option value="" disabled selected>Select Source...</option>
+                        <option value="A">MG Road (A)</option>
+                        <option value="B">Indiranagar (B)</option>
+                        <option value="C">Koramangala (C)</option>
+                        <option value="D">HSR Layout (D)</option>
+                        <option value="E">Jayanagar (E)</option>
+                        <option value="F">JP Nagar (F)</option>
+                        <option value="G">Electronic City (G)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="destination">Destination Intersection:</label>
+                    <select id="destination" name="destination" required>
+                        <option value="" disabled selected>Select Destination...</option>
+                        <option value="A">MG Road (A)</option>
+                        <option value="B">Indiranagar (B)</option>
+                        <option value="C">Koramangala (C)</option>
+                        <option value="D">HSR Layout (D)</option>
+                        <option value="E">Jayanagar (E)</option>
+                        <option value="F">JP Nagar (F)</option>
+                        <option value="G">Electronic City (G)</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn-primary">Find Optimal Route</button>
+            </form>
+
+            <div id="results" class="results-panel hidden">
+                <h3>Route Analytics</h3>
+                <div class="metric">
+                    <span class="label">Optimal Path:</span>
+                    <span id="optimal-path-text" class="value text-gradient">-</span>
+                </div>
+                <div class="metric">
+                    <span class="label">Effective Travel Time:</span>
+                    <span id="travel-time-text" class="value">-</span>
+                </div>
+            </div>
+            
+            <div class="legend">
+                <h4>Congestion Legend</h4>
+                <div class="legend-item"><span class="color-box" style="background: #2ecc71;"></span> Free Flow</div>
+                <div class="legend-item"><span class="color-box" style="background: #f1c40f;"></span> Moderate</div>
+                <div class="legend-item"><span class="color-box" style="background: #e74c3c;"></span> Heavy</div>
+            </div>
+        </aside>
+
+        <!-- Main Map Area -->
+        <main class="map-container">
+            <div id="map"></div>
+        </main>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <!-- Custom JS -->
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
