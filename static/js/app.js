@@ -140,3 +140,20 @@ function renderNetwork(graph, optimalRoute) {
     const bounds = L.latLngBounds(graph.nodes.map(n => [n.lat, n.lng]));
     map.fitBounds(bounds, { padding: [50, 50] });
 }
+
+// Sidebar Toggle Logic for Mobile
+const sidebarToggle = document.getElementById('sidebar-toggle');
+const sidebar = document.getElementById('sidebar');
+
+if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => {
+        sidebar.classList.toggle('active');
+        
+        // Invalidate map size after CSS transition completes
+        // Ensures smooth rendering on mobile devices
+        setTimeout(() => {
+            map.invalidateSize();
+        }, 300);
+    });
+}
+

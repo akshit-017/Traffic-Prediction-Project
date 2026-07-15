@@ -201,3 +201,56 @@ select option {
 .leaflet-container {
     background: #0f172a;
 }
+
+/* Sidebar Toggle Button */
+.sidebar-toggle {
+    display: none;
+    position: absolute;
+    top: 1rem;
+    left: 1rem;
+    z-index: 2000;
+    background: var(--primary-color);
+    border: none;
+    border-radius: 8px;
+    padding: 0.5rem;
+    color: white;
+    cursor: pointer;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+    transition: background-color 0.3s;
+}
+
+.sidebar-toggle:hover {
+    background: var(--primary-hover);
+}
+
+.sidebar-toggle svg {
+    display: block;
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 768px) {
+    .sidebar-toggle {
+        display: block;
+    }
+    
+    .sidebar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        width: 100%;
+        max-width: 320px;
+        transform: translateX(-100%);
+        transition: transform 0.3s ease-in-out;
+        z-index: 1500;
+    }
+    
+    .sidebar.active {
+        transform: translateX(0);
+    }
+    
+    /* Ensure Leaflet controls don't overlap with the toggle button */
+    .leaflet-control-zoom {
+        margin-top: 4rem !important;
+    }
+}

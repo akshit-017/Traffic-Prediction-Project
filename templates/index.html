@@ -14,7 +14,7 @@
 <body>
     <div class="app-container">
         <!-- Sidebar for Controls -->
-        <aside class="glass-panel sidebar">
+        <aside class="glass-panel sidebar" id="sidebar">
             <header>
                 <h1>AI Traffic Optimizer</h1>
                 <p>Predictive routing powered by Random Forest</p>
@@ -74,6 +74,9 @@
 
         <!-- Main Map Area -->
         <main class="map-container">
+            <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle Sidebar">
+                <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+            </button>
             <div id="map"></div>
         </main>
     </div>
