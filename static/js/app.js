@@ -1,5 +1,13 @@
 // Initialize the Map centered on central Bengaluru
-const map = L.map('map').setView([12.94, 77.62], 12);
+const map = L.map('map', {
+    dragging: true,
+    touchZoom: true,
+    scrollWheelZoom: true,
+    tap: true
+}).setView([12.94, 77.62], 12);
+
+// Explicitly enable dragging in case any CSS or init timing issue disabled it
+map.dragging.enable();
 
 // Add a dark theme tile layer (CartoDB Dark Matter)
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
@@ -20,6 +28,32 @@ function getCongestionColor(congestion) {
     if (congestion < 1.0) return '#2ecc71'; // Green (Free flow)
     if (congestion < 3.0) return '#f1c40f'; // Yellow (Moderate)
     return '#e74c3c'; // Red (Heavy)
+}
+
+// ============================================================
+// Travel-time conversion: abstract weight → realistic minutes
+// ============================================================
+// Scaling: 1 effective_weight unit ≈ 3.5 real minutes.
+// This produces realistic Bengaluru durations, e.g.:
+//   A→G (weight ~23.7) → ~83 min  (heavy congestion path)
+//   A→G (weight ~13)   → ~46 min  (free-flow path)
+const MINUTES_PER_WEIGHT_UNIT = 3.5;
+
+/**
+ * Convert an abstract weight to a human-readable travel time string.
+ * Examples: "52 mins", "1 hr 12 mins", "1 hr"
+ */
+function formatTravelTime(weight) {
+    const totalMinutes = Math.round(weight * MINUTES_PER_WEIGHT_UNIT);
+    if (totalMinutes < 60) {
+        return `${totalMinutes} mins`;
+    }
+    const hours = Math.floor(totalMinutes / 60);
+    const mins  = totalMinutes % 60;
+    if (mins === 0) {
+        return `${hours} hr`;
+    }
+    return `${hours} hr ${mins} mins`;
 }
 
 document.getElementById('route-form').addEventListener('submit', async (e) => {
@@ -52,7 +86,7 @@ document.getElementById('route-form').addEventListener('submit', async (e) => {
         
         // Update Results UI
         document.getElementById('optimal-path-text').innerText = data.route.join(' → ');
-        document.getElementById('travel-time-text').innerText = data.total_weight.toFixed(2) + ' units';
+        document.getElementById('travel-time-text').innerText = formatTravelTime(data.total_weight);
         document.getElementById('results').classList.remove('hidden');
 
         // On mobile, auto-close sidebar after finding route so user sees the map

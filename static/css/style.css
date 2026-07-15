@@ -196,6 +196,7 @@ select option {
     position: relative;
     z-index: 1;                 /* lower than sidebar so sidebar renders on top visually */
     pointer-events: auto;       /* ensure map always receives events */
+    touch-action: none;         /* pass touch-drag to Leaflet, not browser scroll */
 }
 
 #map {
@@ -203,6 +204,7 @@ select option {
     height: 100%;
     z-index: 1;
     pointer-events: auto;      /* explicit: map canvas always clickable */
+    touch-action: none;        /* let Leaflet handle all touch gestures */
 }
 
 /* Leaflet Dark Theme Overrides */
