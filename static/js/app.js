@@ -54,12 +54,33 @@ document.getElementById('route-form').addEventListener('submit', async (e) => {
         document.getElementById('optimal-path-text').innerText = data.route.join(' → ');
         document.getElementById('travel-time-text').innerText = data.total_weight.toFixed(2) + ' units';
         document.getElementById('results').classList.remove('hidden');
+
+        // On mobile, auto-close sidebar after finding route so user sees the map
+        if (window.innerWidth <= 768) {
+            closeSidebar();
+        }
         
     } catch (error) {
         console.error("Error fetching route:", error);
         alert("Failed to connect to the prediction server.");
     }
 });
+
+/**
+ * Build the full coordinate array for an edge.
+ * Uses the waypoints stored on the edge to trace actual road curves
+ * instead of drawing a straight line between source and target nodes.
+ */
+function buildEdgeLatLngs(sourceNode, targetNode, waypoints) {
+    const coords = [[sourceNode.lat, sourceNode.lng]];
+
+    if (waypoints && waypoints.length > 0) {
+        waypoints.forEach(wp => coords.push([wp[0], wp[1]]));
+    }
+
+    coords.push([targetNode.lat, targetNode.lng]);
+    return coords;
+}
 
 function renderNetwork(graph, optimalRoute) {
     clearMap();
@@ -92,10 +113,8 @@ function renderNetwork(graph, optimalRoute) {
         const targetNode = nodeDict[edge.target];
         
         if (sourceNode && targetNode) {
-            const latlngs = [
-                [sourceNode.lat, sourceNode.lng],
-                [targetNode.lat, targetNode.lng]
-            ];
+            // Build polyline through waypoints instead of a straight line
+            const latlngs = buildEdgeLatLngs(sourceNode, targetNode, edge.waypoints);
             
             // Check if this edge is part of the optimal route
             let isOptimal = false;
@@ -141,19 +160,36 @@ function renderNetwork(graph, optimalRoute) {
     map.fitBounds(bounds, { padding: [50, 50] });
 }
 
-// Sidebar Toggle Logic for Mobile
+// ============================================================
+// Sidebar Toggle Logic (mobile hamburger + overlay backdrop)
+// ============================================================
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebar = document.getElementById('sidebar');
+const sidebarOverlay = document.getElementById('sidebar-overlay');
+
+function openSidebar() {
+    sidebar.classList.add('active');
+    if (sidebarOverlay) sidebarOverlay.classList.add('active');
+}
+
+function closeSidebar() {
+    sidebar.classList.remove('active');
+    if (sidebarOverlay) sidebarOverlay.classList.remove('active');
+    // Recalculate map size after CSS transition finishes
+    setTimeout(() => map.invalidateSize(), 300);
+}
 
 if (sidebarToggle && sidebar) {
     sidebarToggle.addEventListener('click', () => {
-        sidebar.classList.toggle('active');
-        
-        // Invalidate map size after CSS transition completes
-        // Ensures smooth rendering on mobile devices
-        setTimeout(() => {
-            map.invalidateSize();
-        }, 300);
+        if (sidebar.classList.contains('active')) {
+            closeSidebar();
+        } else {
+            openSidebar();
+        }
     });
 }
 
+// Tap the backdrop overlay to close the sidebar on mobile
+if (sidebarOverlay) {
+    sidebarOverlay.addEventListener('click', closeSidebar);
+}

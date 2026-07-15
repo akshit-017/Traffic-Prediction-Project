@@ -43,11 +43,14 @@ body {
 
 .sidebar {
     width: 350px;
+    min-width: 350px;       /* prevent flex shrink from collapsing it */
     padding: 2rem;
     display: flex;
     flex-direction: column;
     gap: 2rem;
-    z-index: 1000; /* Above Leaflet map */
+    position: relative;     /* stay in normal flow on desktop */
+    z-index: 10;            /* above map but below Leaflet popups only when needed */
+    overflow-y: auto;
 }
 
 header h1 {
@@ -185,16 +188,21 @@ select option {
     border-radius: 4px;
 }
 
-/* Map Area */
+/* ========================================
+   Map Area – interactivity fix
+   ======================================== */
 .map-container {
     flex-grow: 1;
     position: relative;
+    z-index: 1;                 /* lower than sidebar so sidebar renders on top visually */
+    pointer-events: auto;       /* ensure map always receives events */
 }
 
 #map {
     width: 100%;
     height: 100%;
     z-index: 1;
+    pointer-events: auto;      /* explicit: map canvas always clickable */
 }
 
 /* Leaflet Dark Theme Overrides */
@@ -202,7 +210,28 @@ select option {
     background: #0f172a;
 }
 
-/* Sidebar Toggle Button */
+/* ========================================
+   Sidebar Overlay (mobile backdrop)
+   ======================================== */
+.sidebar-overlay {
+    display: none;              /* hidden by default, even on mobile */
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 1400;              /* between map and sidebar */
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+    pointer-events: none;
+}
+
+.sidebar-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* ========================================
+   Sidebar Toggle Button (hamburger)
+   ======================================== */
 .sidebar-toggle {
     display: none;
     position: absolute;
@@ -227,29 +256,49 @@ select option {
     display: block;
 }
 
-/* Mobile Responsiveness */
+/* ========================================
+   Mobile Responsiveness (< 768px)
+   ======================================== */
 @media (max-width: 768px) {
+    /* Show hamburger toggle */
     .sidebar-toggle {
         display: block;
     }
-    
+
+    /* Show overlay element (visibility controlled by .active class) */
+    .sidebar-overlay {
+        display: block;
+    }
+
+    /* Sidebar slides in from the left */
     .sidebar {
-        position: absolute;
+        position: fixed;
         top: 0;
         left: 0;
         height: 100vh;
-        width: 100%;
+        height: 100dvh;            /* dynamic viewport height for mobile browsers */
+        width: 85vw;
         max-width: 320px;
+        min-width: 0;
         transform: translateX(-100%);
         transition: transform 0.3s ease-in-out;
-        z-index: 1500;
+        z-index: 1500;             /* above overlay */
+        pointer-events: none;      /* off-screen sidebar must not intercept map touches */
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
     }
-    
+
     .sidebar.active {
         transform: translateX(0);
+        pointer-events: auto;      /* re-enable interaction when visible */
     }
-    
-    /* Ensure Leaflet controls don't overlap with the toggle button */
+
+    /* Map takes full width */
+    .map-container {
+        width: 100%;
+    }
+
+    /* Push Leaflet zoom control below the hamburger button */
     .leaflet-control-zoom {
         margin-top: 4rem !important;
     }

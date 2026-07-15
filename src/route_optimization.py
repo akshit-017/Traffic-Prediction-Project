@@ -14,6 +14,8 @@ class RouteOptimizer:
         Nodes represent intersections, edges represent road segments.
         Default weight (distance/base travel time) is assigned, but congestion
         will be added dynamically later.
+        Each edge includes 'waypoints' — intermediate [lat, lng] coordinates
+        that trace the approximate physical road path in Bengaluru.
         """
         # Define nodes with Bengaluru GPS coordinates (lat, lng)
         nodes = {
@@ -25,11 +27,68 @@ class RouteOptimizer:
             'F': {'name': 'JP Nagar', 'lat': 12.906, 'lng': 77.585},
             'G': {'name': 'Electronic City', 'lat': 12.845, 'lng': 77.660}
         }
-        
+
         for node_id, attrs in nodes.items():
             self.graph.add_node(node_id, **attrs)
 
-        # Add edges (u, v, base_weight)
+        # Intermediate waypoints tracing approximate real road curves.
+        # Each list contains [lat, lng] pairs between the two endpoint nodes.
+        edge_waypoints = {
+            # A→B: MG Road east along Old Airport Rd / 100 Feet Rd to Indiranagar
+            ('A', 'B'): [
+                [12.974, 77.615], [12.975, 77.620], [12.977, 77.625],
+                [12.978, 77.630], [12.978, 77.635]
+            ],
+            # A→C: MG Road south via Residency Rd, Hosur Rd to Koramangala
+            ('A', 'C'): [
+                [12.970, 77.612], [12.965, 77.614], [12.958, 77.616],
+                [12.950, 77.618], [12.945, 77.620], [12.940, 77.622]
+            ],
+            # B→C: Indiranagar south along Inner Ring Rd to Koramangala
+            ('B', 'C'): [
+                [12.975, 77.637], [12.970, 77.636], [12.963, 77.634],
+                [12.955, 77.632], [12.948, 77.630], [12.940, 77.627]
+            ],
+            # B→D: Indiranagar south-east via HAL / Outer Ring Rd to HSR Layout
+            ('B', 'D'): [
+                [12.975, 77.640], [12.968, 77.641], [12.958, 77.642],
+                [12.945, 77.643], [12.935, 77.643], [12.925, 77.644],
+                [12.918, 77.644]
+            ],
+            # C→E: Koramangala west via Hosur Rd / South End Circle to Jayanagar
+            ('C', 'E'): [
+                [12.934, 77.618], [12.933, 77.612], [12.932, 77.605],
+                [12.931, 77.598], [12.930, 77.590], [12.929, 77.585]
+            ],
+            # D→E: HSR Layout west via BTM Layout / Bannerghatta Rd to Jayanagar
+            ('D', 'E'): [
+                [12.915, 77.638], [12.918, 77.630], [12.920, 77.620],
+                [12.922, 77.610], [12.925, 77.600], [12.927, 77.590]
+            ],
+            # D→F: HSR Layout south-west via BTM Layout to JP Nagar
+            ('D', 'F'): [
+                [12.912, 77.638], [12.911, 77.630], [12.910, 77.620],
+                [12.909, 77.610], [12.908, 77.600], [12.907, 77.590]
+            ],
+            # E→F: Jayanagar south along main road to JP Nagar
+            ('E', 'F'): [
+                [12.926, 77.580], [12.922, 77.581], [12.918, 77.582],
+                [12.914, 77.583], [12.910, 77.584]
+            ],
+            # E→G: Jayanagar south-east via Bannerghatta / Hosur Rd to Electronic City
+            ('E', 'G'): [
+                [12.925, 77.585], [12.918, 77.595], [12.910, 77.608],
+                [12.900, 77.620], [12.890, 77.632], [12.875, 77.645],
+                [12.860, 77.652], [12.850, 77.657]
+            ],
+            # F→G: JP Nagar south via Bannerghatta Rd to Electronic City
+            ('F', 'G'): [
+                [12.900, 77.588], [12.893, 77.595], [12.885, 77.608],
+                [12.875, 77.622], [12.865, 77.638], [12.855, 77.650]
+            ],
+        }
+
+        # Add edges (u, v, base_weight) with waypoints
         edges = [
             ('A', 'B', 5), ('A', 'C', 10),
             ('B', 'C', 2), ('B', 'D', 8),
@@ -38,10 +97,14 @@ class RouteOptimizer:
             ('E', 'F', 2), ('E', 'G', 7),
             ('F', 'G', 4)
         ]
-        
+
         for u, v, w in edges:
-            # We initialize effective_weight to base_weight by default
-            self.graph.add_edge(u, v, base_weight=w, congestion=0, effective_weight=w)
+            waypoints = edge_waypoints.get((u, v), [])
+            self.graph.add_edge(
+                u, v,
+                base_weight=w, congestion=0, effective_weight=w,
+                waypoints=waypoints
+            )
 
     def update_edge_weights(self, predictions_dict):
         """
@@ -83,6 +146,7 @@ class RouteOptimizer:
     def get_graph_data(self):
         """
         Exports the graph data (nodes, edges, weights) as a dictionary for the frontend.
+        Includes waypoints for road-aligned polyline rendering.
         """
         nodes = []
         for node, data in self.graph.nodes(data=True):
@@ -92,7 +156,7 @@ class RouteOptimizer:
                 'lat': data.get('lat', 0),
                 'lng': data.get('lng', 0)
             })
-            
+
         edges = []
         for u, v, data in self.graph.edges(data=True):
             edges.append({
@@ -100,7 +164,8 @@ class RouteOptimizer:
                 'target': v,
                 'base_weight': data.get('base_weight', 0),
                 'congestion': data.get('congestion', 0),
-                'effective_weight': data.get('effective_weight', 0)
+                'effective_weight': data.get('effective_weight', 0),
+                'waypoints': data.get('waypoints', [])
             })
-            
+
         return {'nodes': nodes, 'edges': edges}
