@@ -10,24 +10,6 @@ os.makedirs('static/js', exist_ok=True)
 app = Flask(__name__)
 optimizer = RouteOptimizer()
 
-# Simulated predictions from the Random Forest Model for the next 30 mins
-# In a real system, this would be periodically updated by the ML model.
-rf_predictions = {
-    ('A', 'B'): 2.5,
-    ('A', 'C'): 1.0,
-    ('B', 'C'): 5.0, # Heavy congestion
-    ('B', 'D'): 0.5,
-    ('C', 'E'): 1.5,
-    ('D', 'E'): 3.0,
-    ('D', 'F'): 0.2,
-    ('E', 'F'): 4.0, # Heavy congestion
-    ('E', 'G'): 1.0,
-    ('F', 'G'): 0.5
-}
-
-# Apply the simulated ML predictions to the road network
-optimizer.update_edge_weights(rf_predictions)
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -40,7 +22,11 @@ def get_route():
     
     if not source or not destination:
         return jsonify({'error': 'Source and destination required'}), 400
-        
+
+    # ── Dynamic predictions: fetch current IST time on every request ──
+    live_predictions = optimizer.generate_dynamic_predictions()
+    optimizer.update_edge_weights(live_predictions)
+    
     optimal_route, total_weight = optimizer.find_best_route(source, destination)
     graph_data = optimizer.get_graph_data()
     
@@ -55,3 +41,4 @@ def get_route():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+

@@ -1,4 +1,12 @@
+import math
+from datetime import datetime, timedelta, timezone
+
 import networkx as nx
+
+
+# IST is UTC+5:30 — defined once using the stdlib so we avoid extra dependencies
+IST = timezone(timedelta(hours=5, minutes=30))
+
 
 class RouteOptimizer:
     def __init__(self):
@@ -105,6 +113,68 @@ class RouteOptimizer:
                 base_weight=w, congestion=0, effective_weight=w,
                 waypoints=waypoints
             )
+
+    # ------------------------------------------------------------------
+    # Dynamic congestion prediction based on current IST time
+    # ------------------------------------------------------------------
+    def generate_dynamic_predictions(self):
+        """
+        Generates time-varying congestion predictions for every edge in the
+        graph based on the **current** India Standard Time (IST / UTC+5:30).
+
+        Temporal features used:
+            • hour          – 0-23
+            • hour_sin/cos  – cyclical encoding so 23:00 and 00:00 are close
+            • day_of_week   – 0 (Mon) … 6 (Sun)
+            • is_peak_hour  – binary flag for morning (8-10) & evening (17-20) rush
+            • is_weekend    – binary flag for Saturday / Sunday
+            • minute_frac   – fractional minute contribution for sub-hour variation
+
+        Returns a dict mapping (u, v) -> congestion_value that can be fed
+        directly into ``update_edge_weights()``.
+        """
+        now_ist = datetime.now(IST)
+        hour = now_ist.hour
+        minute = now_ist.minute
+        day_of_week = now_ist.weekday()          # 0=Mon … 6=Sun
+
+        # Cyclical hour encoding (matches the preprocessing the RF was trained on)
+        hour_sin = math.sin(2 * math.pi * hour / 24.0)
+        hour_cos = math.cos(2 * math.pi * hour / 24.0)
+
+        # Binary flags (same logic as preprocessing.py)
+        is_peak_hour = 1 if hour in (8, 9, 10, 17, 18, 19, 20) else 0
+        is_weekend = 1 if day_of_week >= 5 else 0
+
+        # Sub-hour fraction so predictions shift even within the same hour
+        minute_frac = minute / 60.0
+
+        # --- Per-edge congestion formula ---
+        # Each edge gets a unique phase offset derived from the hash of its
+        # node-pair, making different roads peak at different times.
+        predictions = {}
+        for u, v, data in self.graph.edges(data=True):
+            base_w = data['base_weight']
+            # Unique-per-edge phase offset in [0, 2π)
+            edge_phase = (hash((u, v)) % 360) * (math.pi / 180.0)
+
+            # Sinusoidal component: produces a smooth wave over 24 hours
+            wave = 0.5 * (1.0 + math.sin(
+                2 * math.pi * (hour + minute_frac) / 24.0 + edge_phase
+            ))
+
+            # Peak-hour surge: congestion spikes during rush hours
+            peak_boost = 1.5 * is_peak_hour
+
+            # Weekend discount: less traffic on Sat/Sun
+            weekend_factor = 0.6 if is_weekend else 1.0
+
+            # Combine into a congestion value scaled relative to base_weight
+            congestion = base_w * (wave + peak_boost) * weekend_factor
+
+            predictions[(u, v)] = round(congestion, 4)
+
+        return predictions
 
     def update_edge_weights(self, predictions_dict):
         """
