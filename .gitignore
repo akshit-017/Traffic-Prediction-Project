@@ -6,3 +6,7 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
+# Trained ML model artefacts (211+ MB) — rebuilt during Render deploy
+models/
+outputs/

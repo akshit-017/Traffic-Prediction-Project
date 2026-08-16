@@ -23,7 +23,7 @@ def get_route():
     if not source or not destination:
         return jsonify({'error': 'Source and destination required'}), 400
 
-    # ── Dynamic predictions: fetch current IST time on every request ──
+    # ── Dynamic predictions: ML model or heuristic fallback ──
     live_predictions = optimizer.generate_dynamic_predictions()
     optimizer.update_edge_weights(live_predictions)
     
@@ -36,9 +36,17 @@ def get_route():
     return jsonify({
         'route': optimal_route,
         'total_weight': total_weight,
-        'graph': graph_data
+        'graph': graph_data,
+        'ml_model_loaded': optimizer.predictor.is_loaded,
+    })
+
+@app.route('/api/model-info')
+def model_info():
+    """Returns whether the ML model is loaded and powering predictions."""
+    return jsonify({
+        'ml_model_loaded': optimizer.predictor.is_loaded,
+        'model_name': 'Random Forest (Log-Transformed)' if optimizer.predictor.is_loaded else None,
     })
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-

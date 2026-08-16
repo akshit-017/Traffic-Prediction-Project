@@ -24,27 +24,22 @@ function clearMap() {
     mapLayers = [];
 }
 
-function getCongestionColor(congestion) {
-    if (congestion < 1.0) return '#2ecc71'; // Green (Free flow)
-    if (congestion < 3.0) return '#f1c40f'; // Yellow (Moderate)
+function getCongestionColor(multiplier) {
+    if (multiplier < 1.3) return '#2ecc71'; // Green (Free flow)
+    if (multiplier < 1.7) return '#f1c40f'; // Yellow (Moderate)
     return '#e74c3c'; // Red (Heavy)
 }
 
 // ============================================================
-// Travel-time conversion: abstract weight → realistic minutes
+// Travel-time formatting: effective_weight is already in minutes
 // ============================================================
-// Scaling: 1 effective_weight unit ≈ 3.5 real minutes.
-// This produces realistic Bengaluru durations, e.g.:
-//   A→G (weight ~23.7) → ~83 min  (heavy congestion path)
-//   A→G (weight ~13)   → ~46 min  (free-flow path)
-const MINUTES_PER_WEIGHT_UNIT = 3.5;
 
 /**
- * Convert an abstract weight to a human-readable travel time string.
- * Examples: "52 mins", "1 hr 12 mins", "1 hr"
+ * Format minutes into a human-readable travel time string.
+ * Examples: "12 mins", "1 hr 12 mins", "2 hr"
  */
-function formatTravelTime(weight) {
-    const totalMinutes = Math.round(weight * MINUTES_PER_WEIGHT_UNIT);
+function formatTravelTime(minutes) {
+    const totalMinutes = Math.round(minutes);
     if (totalMinutes < 60) {
         return `${totalMinutes} mins`;
     }
@@ -88,6 +83,19 @@ document.getElementById('route-form').addEventListener('submit', async (e) => {
         document.getElementById('optimal-path-text').innerText = data.route.join(' → ');
         document.getElementById('travel-time-text').innerText = formatTravelTime(data.total_weight);
         document.getElementById('results').classList.remove('hidden');
+
+        // Show ML model status
+        const mlBadge = document.getElementById('ml-status');
+        if (mlBadge) {
+            if (data.ml_model_loaded) {
+                mlBadge.innerHTML = '🤖 <strong>ML Model Active</strong> — Random Forest';
+                mlBadge.className = 'ml-badge ml-active';
+            } else {
+                mlBadge.innerHTML = '⚠️ <strong>Heuristic Mode</strong> — Run <code>python main.py</code> to enable ML';
+                mlBadge.className = 'ml-badge ml-fallback';
+            }
+            mlBadge.style.display = 'block';
+        }
 
         // On mobile, auto-close sidebar after finding route so user sees the map
         if (window.innerWidth <= 768) {
@@ -160,7 +168,7 @@ function renderNetwork(graph, optimalRoute) {
                 }
             }
             
-            const color = getCongestionColor(edge.congestion);
+            const color = getCongestionColor(edge.congestion_multiplier);
             
             // Draw background line for congestion visualization
             const polyline = L.polyline(latlngs, {
@@ -170,10 +178,18 @@ function renderNetwork(graph, optimalRoute) {
                 dashArray: isOptimal ? null : '5, 10'
             }).addTo(map);
             
-            // Add tooltip with weights
-            polyline.bindTooltip(`Base: ${edge.base_weight}<br>Congestion: ${edge.congestion.toFixed(2)}`, {
-                sticky: true
-            });
+            // Add tooltip with real travel info + ML predicted volume
+            const freeFlow = edge.base_weight.toFixed(1);
+            const withTraffic = edge.effective_weight.toFixed(1);
+            const dist = edge.distance_km.toFixed(1);
+            const cong = edge.congestion_multiplier.toFixed(2);
+            const predVol = Math.round(edge.predicted_volume || 0).toLocaleString();
+            let tooltipHtml = `${dist} km · Free-flow: ${freeFlow} min<br>`
+                + `With traffic: ${withTraffic} min (×${cong})`;
+            if (edge.predicted_volume > 0) {
+                tooltipHtml += `<br>ML Predicted Volume: ${predVol} vehicles`;
+            }
+            polyline.bindTooltip(tooltipHtml, { sticky: true });
             
             mapLayers.push(polyline);
             

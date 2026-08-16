@@ -1,4 +1,7 @@
 import os
+import joblib
+import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split
 
 # Importing our custom modules
@@ -8,6 +11,32 @@ from src.models.random_forest import RandomForestModel
 from src.models.svr import SVRModel
 from src.evaluator import ModelEvaluator
 from src.route_optimization import RouteOptimizer
+
+# Directory where trained artefacts are persisted for the web app
+MODELS_DIR = os.path.join(os.path.dirname(__file__), 'models')
+
+
+def _build_historical_stats(df):
+    """
+    Compute per-(area, road, hour) historical averages for the features
+    that require lagged / rolling data at inference time.
+
+    Returns a DataFrame indexed by (area name, road/intersection name, hour)
+    with columns: mean_volume, mean_speed, mean_vol_lag1, mean_vol_lag2,
+    mean_rolling3.
+    """
+    stats = (
+        df.groupby(['area name', 'road/intersection name', 'hour'])
+        .agg(
+            mean_volume=('traffic volume', 'mean'),
+            mean_speed=('average speed', 'mean'),
+            mean_vol_lag1=('vol_1_step_ago', 'mean'),
+            mean_vol_lag2=('vol_2_steps_ago', 'mean'),
+            mean_rolling3=('rolling_trend_3', 'mean'),
+        )
+    )
+    return stats
+
 
 def main():
     print("🚀 Starting AI-Based Proactive Traffic Prediction System...\n")
@@ -62,39 +91,66 @@ def main():
     print("It successfully predicted traffic 30-60 mins in advance with the lowest error rate.")
     print("="*40 + "\n")
 
-    # 8. Route Optimization Demonstration
+    # ──────────────────────────────────────────────────────────────
+    # 8. SAVE TRAINED ARTEFACTS for the web app
+    # ──────────────────────────────────────────────────────────────
+    os.makedirs(MODELS_DIR, exist_ok=True)
+
+    # 8a. Save the best model (Random Forest)
+    rf_model = models_dict["Random Forest"].model
+    joblib.dump(rf_model, os.path.join(MODELS_DIR, 'random_forest.joblib'))
+    print("💾 Saved trained Random Forest model → models/random_forest.joblib")
+
+    # 8b. Save the scaler so the web predictor transforms inputs identically
+    joblib.dump(preprocessor.scaler, os.path.join(MODELS_DIR, 'scaler.joblib'))
+    print("💾 Saved StandardScaler           → models/scaler.joblib")
+
+    # 8c. Save label encoders (area, road, weather)
+    #     We need to re-fit them on the cleaned data to get stable mappings.
+    from sklearn.preprocessing import LabelEncoder
+    area_enc = LabelEncoder().fit(df_clean['area name'])
+    road_enc = LabelEncoder().fit(df_clean['road/intersection name'])
+    weather_enc = LabelEncoder().fit(df_clean['weather conditions'])
+
+    joblib.dump(area_enc, os.path.join(MODELS_DIR, 'area_encoder.joblib'))
+    joblib.dump(road_enc, os.path.join(MODELS_DIR, 'road_encoder.joblib'))
+    joblib.dump(weather_enc, os.path.join(MODELS_DIR, 'weather_encoder.joblib'))
+    print("💾 Saved LabelEncoders             → models/*_encoder.joblib")
+
+    # 8d. Save historical statistics for filling lagged features at inference
+    hist_stats = _build_historical_stats(df_clean)
+    joblib.dump(hist_stats, os.path.join(MODELS_DIR, 'historical_stats.joblib'))
+    print("💾 Saved historical stats          → models/historical_stats.joblib")
+
+    # 8e. Save per-area median volume (used to normalise predicted volume → multiplier)
+    area_medians = df_clean.groupby('area name')['traffic volume'].median()
+    joblib.dump(area_medians, os.path.join(MODELS_DIR, 'area_medians.joblib'))
+    print("💾 Saved area median volumes       → models/area_medians.joblib")
+
+    print("\n✅ All ML artefacts saved. The web app will now use Real ML predictions!\n")
+
+    # ──────────────────────────────────────────────────────────────
+    # 9. Route Optimization Demonstration (uses live ML predictor)
+    # ──────────────────────────────────────────────────────────────
     print("\n🗺️ Demonstrating Route Optimization (Objective 2) 🗺️\n")
     optimizer = RouteOptimizer()
-    
-    # Simulated predictions from the Random Forest Model for the next 30 mins
-    # We will map these directly to the edges
-    rf_predictions = {
-        ('A', 'B'): 2.5,
-        ('A', 'C'): 1.0,
-        ('B', 'C'): 5.0, # Heavy congestion
-        ('B', 'D'): 0.5,
-        ('C', 'E'): 1.5,
-        ('D', 'E'): 3.0,
-        ('D', 'F'): 0.2,
-        ('E', 'F'): 4.0, # Heavy congestion
-        ('E', 'G'): 1.0,
-        ('F', 'G'): 0.5
-    }
-    
-    print("🚦 Updating road network with predicted congestion weights...")
-    optimizer.update_edge_weights(rf_predictions)
-    
+
+    print("🚦 Generating ML-based congestion predictions for current time...")
+    predictions = optimizer.generate_dynamic_predictions()
+    optimizer.update_edge_weights(predictions)
+
     source_node = 'A'
     dest_node = 'G'
     print(f"📍 Finding the most efficient route from {source_node} to {dest_node}...")
-    
+
     optimal_route, total_weight = optimizer.find_best_route(source_node, dest_node)
-    
+
     if optimal_route:
         print(f"✅ Optimal Route: {' -> '.join(optimal_route)}")
-        print(f"⏱️ Total Effective Travel Time (Base + Congestion): {total_weight:.2f}")
+        print(f"⏱️ Estimated Travel Time: {total_weight:.1f} minutes")
     else:
         print("❌ No valid route found.")
 
 if __name__ == "__main__":
-    main()  
+    main()
+  
