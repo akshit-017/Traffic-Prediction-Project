@@ -1,20 +1,5 @@
 import os
 from flask import Flask, render_template, request, jsonify
-
-# ── Auto-train ML model if artefacts are missing ──────────────────────
-# The models/ folder is gitignored, so on a fresh Render deploy the
-# trained files won't exist.  This block runs main.py's training
-# pipeline once so the app starts with a working ML model.
-_model_path = os.path.join(os.path.dirname(__file__), 'models', 'random_forest.joblib')
-if not os.path.exists(_model_path):
-    print("🔧 ML model not found — auto-training before first request...")
-    try:
-        from main import main as train_main
-        train_main()
-        print("✅ Auto-training complete.")
-    except Exception as e:
-        print(f"⚠️ Auto-training failed ({e}). App will use heuristic fallback.")
-
 from src.route_optimization import RouteOptimizer
 
 # Ensure template and static directories exist
