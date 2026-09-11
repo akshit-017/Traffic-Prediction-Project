@@ -10,3 +10,7 @@ __pycache__/
 # Trained ML model artefacts (211+ MB) — rebuilt during Render deploy
 models/
 outputs/
+
+# SQLite database (local search history)
+traffic_history.db
+

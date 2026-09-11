@@ -3,91 +3,157 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Proactive Traffic Prediction & Optimization</title>
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <title>Bengaluru Traffic Route Optimization — ML-Powered</title>
+    <meta name="description" content="ML-powered traffic route optimizer for Bengaluru using Random Forest predictions to visualize per-segment congestion on an interactive dark map.">
+
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
     <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+
     <!-- Custom CSS -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-    <div class="app-container">
-        <!-- Sidebar for Controls -->
-        <aside class="glass-panel sidebar" id="sidebar">
-            <header>
-                <h1>AI Traffic Optimizer</h1>
-                <p>Predictive routing powered by Random Forest</p>
-            </header>
-            
-            <form id="route-form">
-                <div class="form-group">
-                    <label for="source">Source Intersection:</label>
-                    <select id="source" name="source" required>
-                        <option value="" disabled selected>Select Source...</option>
-                        <option value="A">MG Road (A)</option>
-                        <option value="B">Indiranagar (B)</option>
-                        <option value="C">Koramangala (C)</option>
-                        <option value="D">HSR Layout (D)</option>
-                        <option value="E">Jayanagar (E)</option>
-                        <option value="F">JP Nagar (F)</option>
-                        <option value="G">Electronic City (G)</option>
-                    </select>
-                </div>
 
-                <div class="form-group">
-                    <label for="destination">Destination Intersection:</label>
-                    <select id="destination" name="destination" required>
-                        <option value="" disabled selected>Select Destination...</option>
-                        <option value="A">MG Road (A)</option>
-                        <option value="B">Indiranagar (B)</option>
-                        <option value="C">Koramangala (C)</option>
-                        <option value="D">HSR Layout (D)</option>
-                        <option value="E">Jayanagar (E)</option>
-                        <option value="F">JP Nagar (F)</option>
-                        <option value="G">Electronic City (G)</option>
-                    </select>
-                </div>
+    <!-- ═══════════════════════════════════════════════════════════
+         FLOATING CONTROL PANEL
+         ═══════════════════════════════════════════════════════════ -->
+    <div class="control-card" id="control-card">
 
-                <button type="submit" class="btn-primary">Find Optimal Route</button>
-            </form>
-
-            <div id="results" class="results-panel hidden">
-                <h3>Route Analytics</h3>
-                <div class="metric">
-                    <span class="label">Optimal Path:</span>
-                    <span id="optimal-path-text" class="value text-gradient">-</span>
+        <!-- Header -->
+        <header class="control-header">
+            <div class="header-text">
+                <div class="logo-row">
+                    <div class="logo-icon">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="3 11 22 2 13 21 11 13 3 11"/>
+                        </svg>
+                    </div>
+                    <h1>Route Optimizer</h1>
                 </div>
-                <div class="metric">
-                    <span class="label">Effective Travel Time:</span>
-                    <span id="travel-time-text" class="value">-</span>
-                </div>
-                <div id="ml-status" class="ml-badge" style="display:none;"></div>
+                <p class="subtitle">Bengaluru ML-Powered Traffic Prediction</p>
             </div>
-            
-            <div class="legend">
-                <h4>Congestion Legend</h4>
-                <div class="legend-item"><span class="color-box" style="background: #2ecc71;"></span> Free Flow</div>
-                <div class="legend-item"><span class="color-box" style="background: #f1c40f;"></span> Moderate</div>
-                <div class="legend-item"><span class="color-box" style="background: #e74c3c;"></span> Heavy</div>
-            </div>
-        </aside>
-
-        <!-- Backdrop overlay for mobile sidebar -->
-        <div id="sidebar-overlay" class="sidebar-overlay"></div>
-
-        <!-- Main Map Area -->
-        <main class="map-container">
-            <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle Sidebar">
-                <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+            <button id="toggle-panel" class="toggle-btn" title="Toggle Panel">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
             </button>
-            <div id="map"></div>
-        </main>
+        </header>
+
+        <div class="control-body" id="control-body">
+
+            <!-- Mode Toggle -->
+            <div class="mode-toggle">
+                <button class="mode-btn active" id="mode-live" data-mode="live">
+                    <span class="mode-dot live-dot"></span>
+                    Depart Now
+                </button>
+                <button class="mode-btn" id="mode-predictive" data-mode="predictive">
+                    <span class="mode-dot predictive-dot"></span>
+                    Plan Future
+                </button>
+            </div>
+
+            <!-- Datetime Picker (hidden by default) -->
+            <div class="datetime-group hidden" id="datetime-group">
+                <label for="departure-time">Departure Time</label>
+                <input type="datetime-local" id="departure-time" class="input-field">
+            </div>
+
+            <!-- Source -->
+            <div class="form-group">
+                <label for="source">
+                    <span class="label-icon origin-icon"></span>
+                    Origin
+                </label>
+                <select id="source" class="input-field" required>
+                    <option value="" disabled selected>Select origin…</option>
+                </select>
+            </div>
+
+            <!-- Destination -->
+            <div class="form-group">
+                <label for="destination">
+                    <span class="label-icon dest-icon"></span>
+                    Destination
+                </label>
+                <select id="destination" class="input-field" required>
+                    <option value="" disabled selected>Select destination…</option>
+                </select>
+            </div>
+
+            <!-- Route Button -->
+            <button type="button" class="btn-route" id="btn-route">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                Find Optimal Route
+            </button>
+
+            <!-- Error Display -->
+            <div class="error-msg hidden" id="error-msg"></div>
+
+            <!-- Results Dashboard -->
+            <div class="results-dashboard hidden" id="results-dashboard">
+
+                <!-- Metrics Grid -->
+                <div class="metrics-grid">
+                    <div class="metric-card" id="metric-card-time">
+                        <span class="metric-icon">🕐</span>
+                        <span class="metric-value" id="metric-time">—</span>
+                        <span class="metric-label">Travel Time</span>
+                    </div>
+                    <div class="metric-card" id="metric-card-distance">
+                        <span class="metric-icon">📍</span>
+                        <span class="metric-value" id="metric-distance">—</span>
+                        <span class="metric-label">Distance</span>
+                    </div>
+                    <div class="metric-card" id="metric-card-cost">
+                        <span class="metric-icon">💰</span>
+                        <span class="metric-value" id="metric-cost">—</span>
+                        <span class="metric-label">Est. Cost</span>
+                    </div>
+                </div>
+
+                <!-- Route Path -->
+                <div class="route-path" id="route-path"></div>
+
+                <!-- Congestion Legend -->
+                <div class="congestion-legend">
+                    <div class="legend-item">
+                        <span class="legend-dot free-flow"></span>
+                        Clear (&gt;25 km/h)
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-dot moderate"></span>
+                        Moderate (15–25)
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-dot heavy"></span>
+                        Heavy (&lt;15 km/h)
+                    </div>
+                </div>
+
+                <!-- Data Source Badge -->
+                <div class="source-badge" id="source-badge"></div>
+
+            </div>
+        </div>
     </div>
 
+    <!-- ═══════════════════════════════════════════════════════════
+         MAP CONTAINER
+         ═══════════════════════════════════════════════════════════ -->
+    <div id="map"></div>
+
     <!-- Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <!-- Custom JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <!-- App JS -->
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

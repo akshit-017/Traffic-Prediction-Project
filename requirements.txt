@@ -1,8 +1,8 @@
-pandas
-numpy
-scikit-learn
-matplotlib
-networkx
 flask
-gunicorn
+networkx
+pandas
+scikit-learn
 joblib
+pymysql
+requests
+numpy

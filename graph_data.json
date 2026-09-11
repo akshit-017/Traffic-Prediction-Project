@@ -1,0 +1,481 @@
+{
+  "nodes": [
+    {
+      "id": "Silk Board",
+      "name": "Silk Board",
+      "lat": 12.9172,
+      "lng": 77.6227
+    },
+    {
+      "id": "Whitefield",
+      "name": "Whitefield",
+      "lat": 12.9698,
+      "lng": 77.75
+    },
+    {
+      "id": "Electronic City",
+      "name": "Electronic City",
+      "lat": 12.8456,
+      "lng": 77.6603
+    },
+    {
+      "id": "Indiranagar",
+      "name": "Indiranagar",
+      "lat": 12.9784,
+      "lng": 77.6408
+    },
+    {
+      "id": "Koramangala",
+      "name": "Koramangala",
+      "lat": 12.9352,
+      "lng": 77.6245
+    },
+    {
+      "id": "Hebbal",
+      "name": "Hebbal",
+      "lat": 13.0358,
+      "lng": 77.597
+    },
+    {
+      "id": "Yelahanka",
+      "name": "Yelahanka",
+      "lat": 13.1007,
+      "lng": 77.5963
+    },
+    {
+      "id": "Majestic",
+      "name": "Majestic",
+      "lat": 12.9767,
+      "lng": 77.5713
+    },
+    {
+      "id": "Malleshwaram",
+      "name": "Malleshwaram",
+      "lat": 12.9965,
+      "lng": 77.57
+    },
+    {
+      "id": "Banashankari",
+      "name": "Banashankari",
+      "lat": 12.9255,
+      "lng": 77.5468
+    },
+    {
+      "id": "Peenya",
+      "name": "Peenya",
+      "lat": 13.03,
+      "lng": 77.52
+    },
+    {
+      "id": "Marathahalli",
+      "name": "Marathahalli",
+      "lat": 12.9591,
+      "lng": 77.7009
+    },
+    {
+      "id": "KR Puram",
+      "name": "KR Puram",
+      "lat": 12.9981,
+      "lng": 77.715
+    },
+    {
+      "id": "Bellandur",
+      "name": "Bellandur",
+      "lat": 12.9256,
+      "lng": 77.6763
+    },
+    {
+      "id": "Jayanagar",
+      "name": "Jayanagar",
+      "lat": 12.9308,
+      "lng": 77.5838
+    },
+    {
+      "id": "JP Nagar",
+      "name": "JP Nagar",
+      "lat": 12.9063,
+      "lng": 77.5857
+    },
+    {
+      "id": "HSR Layout",
+      "name": "HSR Layout",
+      "lat": 12.9116,
+      "lng": 77.6474
+    },
+    {
+      "id": "BTM Layout",
+      "name": "BTM Layout",
+      "lat": 12.9166,
+      "lng": 77.6101
+    },
+    {
+      "id": "Sarjapur Road",
+      "name": "Sarjapur Road",
+      "lat": 12.91,
+      "lng": 77.685
+    },
+    {
+      "id": "Bannerghatta Road",
+      "name": "Bannerghatta Road",
+      "lat": 12.8876,
+      "lng": 77.5969
+    },
+    {
+      "id": "MG Road",
+      "name": "MG Road",
+      "lat": 12.9756,
+      "lng": 77.6069
+    },
+    {
+      "id": "Sadashivanagar",
+      "name": "Sadashivanagar",
+      "lat": 13.0067,
+      "lng": 77.5802
+    },
+    {
+      "id": "Rajajinagar",
+      "name": "Rajajinagar",
+      "lat": 12.99,
+      "lng": 77.553
+    },
+    {
+      "id": "Yeshwanthpur",
+      "name": "Yeshwanthpur",
+      "lat": 13.022,
+      "lng": 77.545
+    },
+    {
+      "id": "Nagawara",
+      "name": "Nagawara",
+      "lat": 13.0452,
+      "lng": 77.615
+    },
+    {
+      "id": "Thanisandra",
+      "name": "Thanisandra",
+      "lat": 13.06,
+      "lng": 77.63
+    },
+    {
+      "id": "Domlur",
+      "name": "Domlur",
+      "lat": 12.961,
+      "lng": 77.6387
+    },
+    {
+      "id": "HAL",
+      "name": "HAL",
+      "lat": 12.959,
+      "lng": 77.665
+    },
+    {
+      "id": "Basavanagudi",
+      "name": "Basavanagudi",
+      "lat": 12.943,
+      "lng": 77.573
+    },
+    {
+      "id": "CV Raman Nagar",
+      "name": "CV Raman Nagar",
+      "lat": 12.986,
+      "lng": 77.664
+    }
+  ],
+  "edges": [
+    {
+      "source": "Silk Board",
+      "target": "Koramangala",
+      "distance_km": 2.8
+    },
+    {
+      "source": "Silk Board",
+      "target": "HSR Layout",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Silk Board",
+      "target": "BTM Layout",
+      "distance_km": 3.2
+    },
+    {
+      "source": "Silk Board",
+      "target": "Bellandur",
+      "distance_km": 5.0
+    },
+    {
+      "source": "Silk Board",
+      "target": "Bannerghatta Road",
+      "distance_km": 5.5
+    },
+    {
+      "source": "Whitefield",
+      "target": "Marathahalli",
+      "distance_km": 7.5
+    },
+    {
+      "source": "Whitefield",
+      "target": "KR Puram",
+      "distance_km": 7.0
+    },
+    {
+      "source": "Electronic City",
+      "target": "Bannerghatta Road",
+      "distance_km": 9.5
+    },
+    {
+      "source": "Electronic City",
+      "target": "HSR Layout",
+      "distance_km": 10.0
+    },
+    {
+      "source": "Indiranagar",
+      "target": "MG Road",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Indiranagar",
+      "target": "Domlur",
+      "distance_km": 2.0
+    },
+    {
+      "source": "Indiranagar",
+      "target": "CV Raman Nagar",
+      "distance_km": 4.0
+    },
+    {
+      "source": "Indiranagar",
+      "target": "HAL",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Koramangala",
+      "target": "MG Road",
+      "distance_km": 4.5
+    },
+    {
+      "source": "Koramangala",
+      "target": "Domlur",
+      "distance_km": 3.0
+    },
+    {
+      "source": "Koramangala",
+      "target": "BTM Layout",
+      "distance_km": 2.5
+    },
+    {
+      "source": "Koramangala",
+      "target": "Jayanagar",
+      "distance_km": 4.0
+    },
+    {
+      "source": "Hebbal",
+      "target": "KR Puram",
+      "distance_km": 11.0
+    },
+    {
+      "source": "Hebbal",
+      "target": "Yeshwanthpur",
+      "distance_km": 5.0
+    },
+    {
+      "source": "Hebbal",
+      "target": "Nagawara",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Hebbal",
+      "target": "Yelahanka",
+      "distance_km": 8.0
+    },
+    {
+      "source": "Hebbal",
+      "target": "Sadashivanagar",
+      "distance_km": 4.5
+    },
+    {
+      "source": "Hebbal",
+      "target": "Thanisandra",
+      "distance_km": 5.5
+    },
+    {
+      "source": "Hebbal",
+      "target": "Peenya",
+      "distance_km": 7.0
+    },
+    {
+      "source": "Yelahanka",
+      "target": "Thanisandra",
+      "distance_km": 6.5
+    },
+    {
+      "source": "Yelahanka",
+      "target": "Peenya",
+      "distance_km": 10.0
+    },
+    {
+      "source": "Majestic",
+      "target": "MG Road",
+      "distance_km": 3.0
+    },
+    {
+      "source": "Majestic",
+      "target": "Malleshwaram",
+      "distance_km": 3.0
+    },
+    {
+      "source": "Majestic",
+      "target": "Rajajinagar",
+      "distance_km": 4.0
+    },
+    {
+      "source": "Majestic",
+      "target": "Basavanagudi",
+      "distance_km": 4.5
+    },
+    {
+      "source": "Majestic",
+      "target": "Sadashivanagar",
+      "distance_km": 4.0
+    },
+    {
+      "source": "Malleshwaram",
+      "target": "Rajajinagar",
+      "distance_km": 2.5
+    },
+    {
+      "source": "Malleshwaram",
+      "target": "Sadashivanagar",
+      "distance_km": 2.0
+    },
+    {
+      "source": "Malleshwaram",
+      "target": "Yeshwanthpur",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Banashankari",
+      "target": "Jayanagar",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Banashankari",
+      "target": "JP Nagar",
+      "distance_km": 3.0
+    },
+    {
+      "source": "Banashankari",
+      "target": "Basavanagudi",
+      "distance_km": 3.0
+    },
+    {
+      "source": "Banashankari",
+      "target": "Bannerghatta Road",
+      "distance_km": 5.0
+    },
+    {
+      "source": "Peenya",
+      "target": "Rajajinagar",
+      "distance_km": 6.5
+    },
+    {
+      "source": "Peenya",
+      "target": "Yeshwanthpur",
+      "distance_km": 4.5
+    },
+    {
+      "source": "Marathahalli",
+      "target": "Bellandur",
+      "distance_km": 5.2
+    },
+    {
+      "source": "Marathahalli",
+      "target": "KR Puram",
+      "distance_km": 5.8
+    },
+    {
+      "source": "Marathahalli",
+      "target": "HAL",
+      "distance_km": 3.8
+    },
+    {
+      "source": "Marathahalli",
+      "target": "Domlur",
+      "distance_km": 5.0
+    },
+    {
+      "source": "KR Puram",
+      "target": "CV Raman Nagar",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Bellandur",
+      "target": "Sarjapur Road",
+      "distance_km": 4.0
+    },
+    {
+      "source": "Bellandur",
+      "target": "HSR Layout",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Jayanagar",
+      "target": "BTM Layout",
+      "distance_km": 3.5
+    },
+    {
+      "source": "Jayanagar",
+      "target": "JP Nagar",
+      "distance_km": 2.5
+    },
+    {
+      "source": "Jayanagar",
+      "target": "Basavanagudi",
+      "distance_km": 2.0
+    },
+    {
+      "source": "JP Nagar",
+      "target": "BTM Layout",
+      "distance_km": 3.0
+    },
+    {
+      "source": "JP Nagar",
+      "target": "Bannerghatta Road",
+      "distance_km": 3.5
+    },
+    {
+      "source": "HSR Layout",
+      "target": "BTM Layout",
+      "distance_km": 2.5
+    },
+    {
+      "source": "HSR Layout",
+      "target": "Sarjapur Road",
+      "distance_km": 4.5
+    },
+    {
+      "source": "MG Road",
+      "target": "Domlur",
+      "distance_km": 2.5
+    },
+    {
+      "source": "Rajajinagar",
+      "target": "Yeshwanthpur",
+      "distance_km": 3.0
+    },
+    {
+      "source": "Nagawara",
+      "target": "Thanisandra",
+      "distance_km": 3.0
+    },
+    {
+      "source": "Nagawara",
+      "target": "CV Raman Nagar",
+      "distance_km": 5.0
+    },
+    {
+      "source": "Domlur",
+      "target": "HAL",
+      "distance_km": 2.5
+    }
+  ]
+}

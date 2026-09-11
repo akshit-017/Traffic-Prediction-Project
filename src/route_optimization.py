@@ -1,4 +1,6 @@
+import json
 import math
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import networkx as nx
@@ -10,8 +12,13 @@ from src.predictor import TrafficPredictor
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Average urban driving speed in Bengaluru (km/h) used to convert distance → time.
-# 33 km/h is a well-established free-flow average for Bengaluru arterial roads.
-BASE_SPEED_KMH = 33.0
+# 26 km/h is the documented average for Bengaluru arterial roads during typical conditions.
+BASE_SPEED_KMH = 26.0
+
+# OSRM returns ideal free-flow durations (no signals, no baseline traffic).
+# Bengaluru roads always have signals, auto-rickshaws, and baseline congestion.
+# This factor bridges the gap between OSRM and real-world (Google Maps) times.
+URBAN_TRAFFIC_BASELINE = 1.5
 
 # ──────────────────────────────────────────────────────────────────────
 # Mapping: graph edge → (dataset area, dataset road)
@@ -59,6 +66,34 @@ def _road_distance_km(lat1, lng1, lat2, lng2, waypoints):
         total += _haversine_km(points[i][0], points[i][1],
                                points[i + 1][0], points[i + 1][1])
     return total * DETOUR_FACTOR
+
+
+def _fetch_osrm_route(lat1, lng1, lat2, lng2):
+    """
+    Fetch the actual road distance (km) and free-flow driving duration
+    (minutes) from the public OSRM demo server.
+
+    Returns (distance_km, duration_minutes) or (None, None) on failure.
+    """
+    # OSRM expects coordinates as lng,lat
+    url = (f"https://router.project-osrm.org/route/v1/driving/"
+           f"{lng1},{lat1};{lng2},{lat2}?overview=false")
+    try:
+        req = urllib.request.Request(
+            url, headers={'User-Agent': 'TrafficPredictionApp/1.0'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get('code') == 'Ok' and data.get('routes'):
+                route = data['routes'][0]
+                dist_km = route['distance'] / 1000.0
+                dur_min = route['duration'] / 60.0
+                return round(dist_km, 2), round(dur_min, 1)
+    except Exception as exc:
+        print(f"[WARNING] OSRM fetch failed for "
+              f"({lat1},{lng1})->({lat2},{lng2}): {exc}")
+    return None, None
+
 
 
 class RouteOptimizer:
@@ -166,14 +201,25 @@ class RouteOptimizer:
             u_data = nodes[u]
             v_data = nodes[v]
 
-            # Real road distance in km (through waypoints + detour factor)
-            dist_km = _road_distance_km(
+            # Try OSRM for real road distance & free-flow duration
+            osrm_dist, osrm_dur = _fetch_osrm_route(
                 u_data['lat'], u_data['lng'],
                 v_data['lat'], v_data['lng'],
-                waypoints,
             )
-            # Free-flow travel time in minutes
-            base_minutes = round((dist_km / BASE_SPEED_KMH) * 60.0, 1)
+
+            if osrm_dist is not None and osrm_dur is not None:
+                dist_km = osrm_dist
+                # Scale OSRM free-flow time by urban baseline to match
+                # real-world driving times (signals, baseline traffic)
+                base_minutes = round(osrm_dur * URBAN_TRAFFIC_BASELINE, 1)
+            else:
+                # Fallback: haversine through waypoints
+                dist_km = round(_road_distance_km(
+                    u_data['lat'], u_data['lng'],
+                    v_data['lat'], v_data['lng'],
+                    waypoints,
+                ), 2)
+                base_minutes = round((dist_km / BASE_SPEED_KMH) * 60.0, 1)
 
             self.graph.add_edge(
                 u, v,
