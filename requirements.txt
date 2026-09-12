@@ -6,3 +6,4 @@ joblib
 pymysql
 requests
 numpy
+gunicorn

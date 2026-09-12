@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import networkx as nx
 import numpy as np
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from bengaluru_graph import load_graph
 from database import init_db, log_telemetry
@@ -163,10 +163,10 @@ def _congestion_label(speed_kmh: float) -> str:
         return "Heavy"
 
 
-def _query_tomtom_speed(lat: float, lng: float) -> float | None:
+def _query_tomtom_speed(lat: float, lng: float) -> tuple[float, float] | None:
     """
     Query TomTom Traffic Flow API for current speed at a coordinate.
-    Returns speed in km/h or None on failure.
+    Returns (speed_kmh, free_flow_speed_kmh) or None on failure.
     """
     if not TOMTOM_API_KEY:
         return None
@@ -185,7 +185,7 @@ def _query_tomtom_speed(lat: float, lng: float) -> float | None:
         speed = flow.get("currentSpeed")
         free_flow = flow.get("freeFlowSpeed", speed)
         if speed and speed > 0:
-            return float(speed), float(free_flow) if free_flow else float(speed)
+            return (float(speed), float(free_flow) if free_flow else float(speed))
     except Exception:
         pass
     return None
@@ -335,34 +335,39 @@ def _assign_predictive_weights(graph: nx.Graph, departure: datetime) -> tuple[bo
 
     import pandas as pd
 
+    fallback_triggered = False
+
     for u, v, data in graph.edges(data=True):
         dist_km = data.get("distance_km", 1.0)
 
         try:
-            # Build a feature row matching the training schema
+            # Build feature row matching the Uber Movement schema
+            # the model was trained on (8 numeric features)
             features = {
                 "hour_of_day": [hour_of_day],
                 "day_of_week": [day_of_week],
                 "is_peak_hour": [is_peak],
-                "area name": [u],
-                "road/intersection name": [f"{u}-{v}"],
-                "weather conditions": ["Clear"],
-                "average speed": [base_speed],
-                "traffic volume": [30000.0 * (1.4 if is_peak else 0.8)],
-                "congestion level": [70.0 if is_peak else 35.0],
-                "road capacity utilization": [80.0 if is_peak else 45.0],
+                "sourceid": [hash(u) % 10000],
+                "dstid": [hash(v) % 10000],
+                "standard_deviation_travel_time": [0.0],
+                "geometric_mean_travel_time": [(dist_km / max(base_speed, 5)) * 3600],
+                "geometric_standard_deviation_travel_time": [0.0],
             }
 
             df = pd.DataFrame(features)
-            predicted_tti_scaled = ML_MODEL.predict(df)[0]
+            predicted_time_min = float(ML_MODEL.predict(df)[0])
 
-            # The model predicts travel_time_index * 10.
-            # Convert back to TTI (congestion multiplier).
-            predicted_tti = predicted_tti_scaled / 10.0
-            predicted_tti = max(0.8, min(2.8, predicted_tti))
+            # The model predicts travel_time_min directly.
+            # Use it to derive a congestion multiplier relative to free-flow.
+            free_flow_estimate = (dist_km / 35.0) * 60.0  # minutes at free flow
+            if free_flow_estimate > 0 and predicted_time_min > 0:
+                ml_congestion = predicted_time_min / max(free_flow_estimate, 0.5)
+                ml_congestion = max(0.8, min(3.0, ml_congestion))
+            else:
+                ml_congestion = 1.0
 
             # Compute weight using time-aware speed adjusted by ML congestion
-            effective_speed = base_speed / predicted_tti
+            effective_speed = base_speed / ml_congestion
             effective_speed = max(5.0, effective_speed)  # minimum 5 km/h
             weight = (dist_km / effective_speed) * 60.0
 
@@ -370,10 +375,12 @@ def _assign_predictive_weights(graph: nx.Graph, departure: datetime) -> tuple[bo
             variation = random.uniform(0.92, 1.08)
             weight *= variation
 
-            congestion = predicted_tti
+            congestion = ml_congestion
 
-        except Exception:
+        except Exception as e:
             # Fallback for this edge: pure speed profile
+            print(f"[ML] _assign_predictive_weights failed for {u}->{v}: {e}")
+            fallback_triggered = True
             weight = (dist_km / base_speed) * 60.0
             congestion = free_flow_speed / base_speed
 
@@ -381,6 +388,8 @@ def _assign_predictive_weights(graph: nx.Graph, departure: datetime) -> tuple[bo
         data["congestion_multiplier"] = round(max(1.0, min(3.0, congestion)), 2)
 
     model_name = ML_MODEL_NAME or "ML"
+    if fallback_triggered:
+        return True, f"{model_name} (Partial Fallback)"
     return False, f"{model_name} Historical Model"
 
 
@@ -411,6 +420,16 @@ def _compute_route(graph: nx.Graph, source: str, destination: str):
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/sw.js")
+def service_worker():
+    """Serve the Service Worker from root scope so it can control all requests."""
+    return send_from_directory(
+        os.path.join(app.static_folder),
+        "sw.js",
+        mimetype="application/javascript",
+    )
 
 
 @app.route("/api/nodes", methods=["GET"])
@@ -542,6 +561,7 @@ def predict_route():
                 [u_data["lat"], u_data["lng"]],
                 [v_data["lat"], v_data["lng"]],
             ],
+            "road_coords": edge_data.get("road_coords", None),
             "color": color,
             "congestion": label,
             "distance_km": round(dist_km, 2),

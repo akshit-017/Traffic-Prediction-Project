@@ -13,13 +13,28 @@ const map = L.map("map", {
 });
 
 // OpenStreetMap tiles — free, no API key required
-L.tileLayer(
+// keepBuffer + updateWhenZooming keep old tiles visible when offline
+const tileLayer = L.tileLayer(
     "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     {
         attribution: '',
         maxZoom: 19,
+        keepBuffer: 5,               // retain tiles well beyond the viewport
+        updateWhenZooming: false,     // don't discard tiles mid-zoom animation
+        updateWhenIdle: true,         // only request new tiles after zoom ends
     }
 ).addTo(map);
+
+// When a tile fails to load (e.g. offline), keep the old tiles visible
+// by preventing the error-tile placeholder from hiding the cached one.
+tileLayer.on('tileerror', function (e) {
+    // Set the failed tile's src to a transparent 1×1 PNG so the <img>
+    // element stays in the DOM without showing a broken-image icon,
+    // while the underlying (still-cached) tiles at other zoom levels
+    // remain visible through Leaflet's keepBuffer mechanism.
+    e.tile.src =
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+});
 
 // ── State ───────────────────────────────────────────────────────
 let mapLayers = [];
@@ -175,12 +190,17 @@ async function fetchRoadGeometry(lat1, lng1, lat2, lng2) {
 
 /**
  * Get road-following coords for an edge.
- * Falls back to straight line if OSRM is unavailable.
+ * Priority: 1) pre-baked road_coords  2) live OSRM  3) straight line
  */
-async function getEdgeCoords(lat1, lng1, lat2, lng2) {
+async function getEdgeCoords(lat1, lng1, lat2, lng2, prebakedCoords) {
+    // 1. Use pre-baked road coordinates from the server (works offline)
+    if (prebakedCoords && Array.isArray(prebakedCoords) && prebakedCoords.length >= 2) {
+        return prebakedCoords;
+    }
+    // 2. Try live OSRM fetch
     const roadCoords = await fetchRoadGeometry(lat1, lng1, lat2, lng2);
     if (roadCoords && roadCoords.length >= 2) return roadCoords;
-    // Fallback: straight line
+    // 3. Fallback: straight line
     return [[lat1, lng1], [lat2, lng2]];
 }
 
@@ -306,7 +326,7 @@ async function renderSegments(data) {
     // ── Draw each segment with its congestion color ─────────────
     const segmentPromises = segments.map(async (seg, idx) => {
         const [[lat1, lng1], [lat2, lng2]] = seg.coordinates;
-        const latlngs = await getEdgeCoords(lat1, lng1, lat2, lng2);
+        const latlngs = await getEdgeCoords(lat1, lng1, lat2, lng2, seg.road_coords);
         const color = seg.color;
 
         // Glow / shadow layer for depth

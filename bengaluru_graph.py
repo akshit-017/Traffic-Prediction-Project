@@ -15,8 +15,14 @@ Each edge has:  distance_km
 
 import json
 import os
+import time
 
 import networkx as nx
+
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 GRAPH_JSON = os.path.join(PROJECT_ROOT, "graph_data.json")
@@ -175,13 +181,17 @@ def load_graph() -> nx.Graph:
                     lng=node["lng"],
                 )
             for edge in data["edges"]:
+                kwargs = {"distance_km": edge["distance_km"]}
+                if "road_coords" in edge and edge["road_coords"]:
+                    kwargs["road_coords"] = edge["road_coords"]
                 G.add_edge(
                     edge["source"],
                     edge["target"],
-                    distance_km=edge["distance_km"],
+                    **kwargs,
                 )
             return G
-        except Exception:
+        except Exception as e:
+            print(f"[GRAPH] Failed to load JSON, falling back to build: {e}")
             pass  # fall through to hardcoded build
 
     return build_graph()
@@ -202,11 +212,14 @@ def generate_json():
 
     edges = []
     for u, v, attrs in G.edges(data=True):
-        edges.append({
+        edge_data = {
             "source": u,
             "target": v,
             "distance_km": attrs["distance_km"],
-        })
+        }
+        if "road_coords" in attrs:
+            edge_data["road_coords"] = attrs["road_coords"]
+        edges.append(edge_data)
 
     data = {"nodes": nodes, "edges": edges}
 
@@ -216,7 +229,119 @@ def generate_json():
     print(f"[OK] graph_data.json written: {len(nodes)} nodes, {len(edges)} edges")
 
 
+# =====================================================================
+# OSRM ROAD GEOMETRY BAKING
+# =====================================================================
+
+def _decode_polyline(encoded: str) -> list:
+    """Decode a Google-encoded polyline into [[lat, lng], ...]."""
+    points = []
+    index = 0
+    lat = 0
+    lng = 0
+    while index < len(encoded):
+        shift = 0
+        result = 0
+        while True:
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1F) << shift
+            shift += 5
+            if b < 0x20:
+                break
+        lat += (~(result >> 1) if (result & 1) else (result >> 1))
+        shift = 0
+        result = 0
+        while True:
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1F) << shift
+            shift += 5
+            if b < 0x20:
+                break
+        lng += (~(result >> 1) if (result & 1) else (result >> 1))
+        points.append([round(lat / 1e5, 6), round(lng / 1e5, 6)])
+    return points
+
+
+def bake_road_coords():
+    """
+    Fetch OSRM road-following geometry for every edge and save
+    the coordinates into graph_data.json so they can be used offline.
+    """
+    if _requests is None:
+        print("[ERROR] 'requests' library is required. pip install requests")
+        return
+
+    G = build_graph()
+    success = 0
+    failed = 0
+
+    for u, v, attrs in G.edges(data=True):
+        u_lat, u_lng = NODES[u]["lat"], NODES[u]["lng"]
+        v_lat, v_lng = NODES[v]["lat"], NODES[v]["lng"]
+
+        url = (
+            f"https://router.project-osrm.org/route/v1/driving/"
+            f"{u_lng},{u_lat};{v_lng},{v_lat}"
+            f"?overview=full&geometries=polyline"
+        )
+
+        try:
+            resp = _requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") == "Ok" and data.get("routes"):
+                coords = _decode_polyline(data["routes"][0]["geometry"])
+                attrs["road_coords"] = coords
+                success += 1
+                print(f"  [OK] {u} -> {v}  ({len(coords)} points)")
+            else:
+                failed += 1
+                print(f"  [FAIL] {u} -> {v}  (OSRM returned: {data.get('code')})")
+        except Exception as e:
+            failed += 1
+            print(f"  [FAIL] {u} -> {v}  ({e})")
+
+        # Respect OSRM rate limits (public demo server)
+        time.sleep(0.5)
+
+    print(f"\n[BAKE] Done: {success} succeeded, {failed} failed")
+
+    # Serialise the graph with road_coords included
+    nodes = []
+    for node_id, node_attrs in G.nodes(data=True):
+        nodes.append({
+            "id": node_id,
+            "name": node_attrs.get("name", node_id),
+            "lat": node_attrs["lat"],
+            "lng": node_attrs["lng"],
+        })
+
+    edges = []
+    for u, v, edge_attrs in G.edges(data=True):
+        edge_data = {
+            "source": u,
+            "target": v,
+            "distance_km": edge_attrs["distance_km"],
+        }
+        if "road_coords" in edge_attrs:
+            edge_data["road_coords"] = edge_attrs["road_coords"]
+        edges.append(edge_data)
+
+    graph_data = {"nodes": nodes, "edges": edges}
+    with open(GRAPH_JSON, "w", encoding="utf-8") as f:
+        json.dump(graph_data, f, indent=2, ensure_ascii=False)
+
+    print(f"[OK] graph_data.json updated with road coordinates")
+
+
 if __name__ == "__main__":
-    generate_json()
+    import sys
+    if "--bake" in sys.argv:
+        print("[BAKE] Fetching OSRM road geometry for all edges...")
+        bake_road_coords()
+    else:
+        generate_json()
     G = load_graph()
     print(f"   Graph loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
