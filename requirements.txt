@@ -1,9 +1,13 @@
-flask
-networkx
-pandas
-scikit-learn
-joblib
-pymysql
-requests
-numpy
-gunicorn
+# ═══════════════════════════════════════════════════════════════
+# Bengaluru Traffic Prediction System — Python Dependencies
+# Target: Hugging Face Spaces (Docker, Free Tier)
+# ═══════════════════════════════════════════════════════════════
+
+flask>=3.0,<4.0
+networkx>=3.0,<4.0
+numpy>=1.24,<2.0
+pandas>=2.0,<3.0
+scikit-learn>=1.3,<2.0
+joblib>=1.3,<2.0
+requests>=2.31,<3.0
+gunicorn>=22.0,<23.0

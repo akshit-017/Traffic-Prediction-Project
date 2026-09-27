@@ -11,8 +11,11 @@ Enterprise-grade traffic routing combining:
 """
 
 import json
+import math
 import os
 import random
+import time as _time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import networkx as nx
@@ -71,6 +74,12 @@ def _get_speed_for_time(hour: float, is_weekend: bool) -> float:
 
 # ── Flask App ────────────────────────────────────────────────────────
 app = Flask(__name__)
+
+# ── Fleet Routing State (in-memory) ──────────────────────────────────
+# Tracks how many active vehicles are traversing each edge
+edge_counters = {}   # {(node_u, node_v): int}
+# Tracks per-session data: assigned edges & last telemetry timestamp
+active_sessions = {} # {session_id: {'assigned_edges': [(u,v), ...], 'last_seen': float}}
 
 # ── Load Graph ───────────────────────────────────────────────────────
 GRAPH = load_graph()
@@ -517,6 +526,11 @@ def predict_route():
             variation = random.uniform(0.90, 1.10)
             predicted_time *= variation
 
+        # ── Fleet congestion penalty ─────────────────────────────
+        fleet_count = edge_counters.get((u, v), 0) + edge_counters.get((v, u), 0)
+        if fleet_count > 0:
+            predicted_time = predicted_time * (1 + (fleet_count * 0.15))
+
         data["weight"] = round(max(0.3, predicted_time), 2)
 
     if fallback_triggered and mode == "live":
@@ -562,6 +576,7 @@ def predict_route():
                 [v_data["lat"], v_data["lng"]],
             ],
             "road_coords": edge_data.get("road_coords", None),
+
             "color": color,
             "congestion": label,
             "distance_km": round(dist_km, 2),
@@ -645,6 +660,12 @@ def get_route():
         departure = _get_ist_datetime(departure_time)
         fallback_triggered, mode_label = _assign_predictive_weights(G, departure)
 
+    # ── Fleet congestion penalty (anti-herding) ───────────────────
+    for u, v, edata in G.edges(data=True):
+        fleet_count = edge_counters.get((u, v), 0) + edge_counters.get((v, u), 0)
+        if fleet_count > 0:
+            edata["weight"] = round(edata["weight"] * (1 + (fleet_count * 0.15)), 2)
+
     # ── Dijkstra pathfinding ──────────────────────────────────────
     path, total_distance_km, travel_time_min = _compute_route(G, source, destination)
 
@@ -704,6 +725,174 @@ def get_route():
             "nodes": graph_nodes,
             "edges": graph_edges,
         },
+    })
+
+
+# =====================================================================
+# FLEET ROUTING ENDPOINTS
+# =====================================================================
+
+def _haversine(lat1, lng1, lat2, lng2):
+    """Return distance in meters between two lat/lng points."""
+    R = 6_371_000  # Earth radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+@app.route("/api/start_trip", methods=["POST"])
+def start_trip():
+    """
+    Register a vehicle on the fleet routing system.
+
+    Accepts:
+        { "session_id": "abc-123", "path": ["NodeA", "NodeB", "NodeC"] }
+
+    Increments edge_counters for every edge on the path and stores
+    the session in active_sessions.
+    """
+    payload = request.json or {}
+    session_id = payload.get("session_id", "").strip()
+    path = payload.get("path", [])
+
+    if not session_id or len(path) < 2:
+        return jsonify({"error": "session_id and a path with ≥2 nodes are required."}), 400
+
+    # If this session already has edges registered, decrement them first
+    if session_id in active_sessions:
+        for edge in active_sessions[session_id].get("assigned_edges", []):
+            key = tuple(edge)
+            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+            if edge_counters[key] == 0:
+                edge_counters.pop(key, None)
+
+    # Build edge list and increment counters
+    edges = []
+    for i in range(len(path) - 1):
+        edge = (path[i], path[i + 1])
+        edges.append(edge)
+        edge_counters[edge] = edge_counters.get(edge, 0) + 1
+
+    active_sessions[session_id] = {
+        "assigned_edges": edges,
+        "last_seen": _time.time(),
+    }
+
+    print(f"[FLEET] Trip started: session={session_id}, edges={len(edges)}, "
+          f"total tracked edges={sum(edge_counters.values())}")
+
+    return jsonify({"status": "registered", "edges_tracked": len(edges)})
+
+
+@app.route("/api/telemetry", methods=["POST"])
+def telemetry():
+    """
+    Receive a telemetry ping from a driving client.
+
+    Accepts:
+        { "session_id": "abc-123", "lat": 12.97, "lng": 77.59 }
+
+    Compares the current position to the assigned route edges.
+    Returns {"status": "on_track"} or {"status": "deviated"}.
+    On deviation the session's edges are decremented from edge_counters.
+    """
+    payload = request.json or {}
+    session_id = payload.get("session_id", "").strip()
+    lat = payload.get("lat")
+    lng = payload.get("lng")
+
+    if not session_id or lat is None or lng is None:
+        return jsonify({"error": "session_id, lat, and lng are required."}), 400
+
+    session = active_sessions.get(session_id)
+    if not session:
+        return jsonify({"status": "no_session"}), 404
+
+    # Update last seen
+    session["last_seen"] = _time.time()
+
+    # Check proximity to any assigned edge (within 500 m of either endpoint)
+    DEVIATION_THRESHOLD_M = 500
+    on_route = False
+
+    for edge in session["assigned_edges"]:
+        u_id, v_id = edge
+        u_node = GRAPH.nodes.get(u_id, {})
+        v_node = GRAPH.nodes.get(v_id, {})
+
+        u_lat, u_lng = u_node.get("lat", 0), u_node.get("lng", 0)
+        v_lat, v_lng = v_node.get("lat", 0), v_node.get("lng", 0)
+
+        # Check distance to either endpoint of the edge
+        dist_u = _haversine(lat, lng, u_lat, u_lng)
+        dist_v = _haversine(lat, lng, v_lat, v_lng)
+
+        # Also check distance to the midpoint
+        mid_lat, mid_lng = (u_lat + v_lat) / 2, (u_lng + v_lng) / 2
+        dist_mid = _haversine(lat, lng, mid_lat, mid_lng)
+
+        if min(dist_u, dist_v, dist_mid) <= DEVIATION_THRESHOLD_M:
+            on_route = True
+            break
+
+    if on_route:
+        return jsonify({"status": "on_track"})
+
+    # ── Deviated: decrement counters and remove session ──────────
+    for edge in session["assigned_edges"]:
+        key = tuple(edge)
+        edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+        if edge_counters[key] == 0:
+            edge_counters.pop(key, None)
+
+    active_sessions.pop(session_id, None)
+
+    print(f"[FLEET] Deviation detected: session={session_id}, "
+          f"pos=({lat:.4f},{lng:.4f}), edges released")
+
+    return jsonify({"status": "deviated"})
+
+
+@app.route("/api/fleet_status", methods=["GET"])
+def fleet_status():
+    """
+    Debug endpoint: return current fleet state.
+    Shows active sessions, edge load counters, and total tracked vehicles.
+    """
+    # Clean up stale sessions (idle > 10 minutes)
+    STALE_THRESHOLD = 600  # seconds
+    now = _time.time()
+    stale_ids = [
+        sid for sid, sdata in active_sessions.items()
+        if now - sdata.get("last_seen", 0) > STALE_THRESHOLD
+    ]
+    for sid in stale_ids:
+        for edge in active_sessions[sid].get("assigned_edges", []):
+            key = tuple(edge)
+            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+            if edge_counters[key] == 0:
+                edge_counters.pop(key, None)
+        active_sessions.pop(sid, None)
+        print(f"[FLEET] Stale session cleaned: {sid}")
+
+    return jsonify({
+        "active_sessions": len(active_sessions),
+        "tracked_edges": len(edge_counters),
+        "total_vehicle_edge_slots": sum(edge_counters.values()),
+        "sessions": {
+            sid: {
+                "edges": len(sdata.get("assigned_edges", [])),
+                "idle_seconds": round(now - sdata.get("last_seen", now)),
+            }
+            for sid, sdata in active_sessions.items()
+        },
+        "edge_loads": {
+            f"{u}->{v}": count
+            for (u, v), count in edge_counters.items()
+        },
+        "stale_cleaned": len(stale_ids),
     })
 
 

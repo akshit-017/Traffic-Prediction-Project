@@ -2,7 +2,13 @@
 // Bengaluru ML-Powered Traffic Route Optimizer — Frontend Controller
 // Uses /api/predict_route for per-edge congestion coloring
 // OSRM road-following paths + Green/Yellow/Red segment rendering
+// Fleet Routing: telemetry loop, car animation, deviation detection
 // ================================================================
+
+// ── Session ID (generated once per page load) ───────────────────
+const SESSION_ID = 'ses-' + Math.random().toString(36).substring(2, 10) +
+                   '-' + Date.now().toString(36);
+console.log('[FLEET] Session ID:', SESSION_ID);
 
 // ── Map Initialization ──────────────────────────────────────────
 const map = L.map("map", {
@@ -40,6 +46,16 @@ tileLayer.on('tileerror', function (e) {
 let mapLayers = [];
 let currentMode = "live";
 
+// ── Fleet Routing / Navigation State ────────────────────────────
+let lastRoutePath = null;       // Array of node IDs from last computed route
+let lastRouteData = null;       // Full response data from /api/predict_route
+let routePolylineCoords = [];   // Flattened array of [lat, lng] along the polyline
+let carMarker = null;           // Leaflet marker for the simulated car
+let telemetryInterval = null;   // setInterval ID for telemetry loop
+let carStepIndex = 0;           // Current position along routePolylineCoords
+let isNavigating = false;       // Whether navigation is active
+let simulateDeviation = false;  // Flag to trigger wrong-turn on next tick
+
 // ── DOM Elements ────────────────────────────────────────────────
 const sourceSelect     = document.getElementById("source");
 const destSelect       = document.getElementById("destination");
@@ -55,6 +71,13 @@ const metricDistance    = document.getElementById("metric-distance");
 const metricCost       = document.getElementById("metric-cost");
 const routePath        = document.getElementById("route-path");
 const sourceBadge      = document.getElementById("source-badge");
+
+// Navigation DOM
+const btnStartNav      = document.getElementById("btn-start-nav");
+const btnWrongTurn     = document.getElementById("btn-wrong-turn");
+const telemetryStatus  = document.getElementById("telemetry-status");
+const telemetryDot     = document.getElementById("telemetry-dot");
+const telemetryText    = document.getElementById("telemetry-text");
 
 // ── Populate Dropdowns ──────────────────────────────────────────
 async function loadNodes() {
@@ -110,6 +133,11 @@ toggleBtn.addEventListener("click", () => {
 function clearMap() {
     mapLayers.forEach((layer) => map.removeLayer(layer));
     mapLayers = [];
+    // Also remove car marker if present
+    if (carMarker) {
+        map.removeLayer(carMarker);
+        carMarker = null;
+    }
 }
 
 // ── Format Travel Time ──────────────────────────────────────────
@@ -212,6 +240,9 @@ btnRoute.addEventListener("click", async () => {
     hideError();
     resultsDashboard.classList.add("hidden");
 
+    // Stop any active navigation when computing a new route
+    stopNavigation();
+
     const source = sourceSelect.value;
     const destination = destSelect.value;
 
@@ -252,6 +283,10 @@ btnRoute.addEventListener("click", async () => {
             return;
         }
 
+        // Store route data for navigation
+        lastRouteData = data;
+        lastRoutePath = data.path || [];
+
         // Render colored segments on the map
         await renderSegments(data);
 
@@ -283,6 +318,9 @@ btnRoute.addEventListener("click", async () => {
 
         resultsDashboard.classList.remove("hidden");
 
+        // Reset navigation UI for new route
+        resetNavUI();
+
     } catch (err) {
         console.error("Route error:", err);
         showError("Failed to connect to the server.");
@@ -303,6 +341,7 @@ btnRoute.addEventListener("click", async () => {
 
 async function renderSegments(data) {
     clearMap();
+    routePolylineCoords = []; // Reset for navigation
 
     const segments = data.segments || [];
     const path = data.path || [];
@@ -362,12 +401,29 @@ async function renderSegments(data) {
 
         mapLayers.push(line);
 
-        // Collect coordinates for bounds
+        // Collect coordinates for bounds AND for navigation animation
         allNodes.push([lat1, lng1]);
         allNodes.push([lat2, lng2]);
+
+        // Return the resolved coords so we can build the animation path
+        return { idx, latlngs };
     });
 
-    await Promise.all(segmentPromises);
+    const resolvedSegments = await Promise.all(segmentPromises);
+
+    // Build the full polyline coordinate list (in order) for car animation
+    resolvedSegments
+        .sort((a, b) => a.idx - b.idx)
+        .forEach((seg, i) => {
+            if (i === 0) {
+                routePolylineCoords.push(...seg.latlngs);
+            } else {
+                // Skip the first point of subsequent segments to avoid duplicates
+                routePolylineCoords.push(...seg.latlngs.slice(1));
+            }
+        });
+
+    console.log(`[FLEET] Route polyline: ${routePolylineCoords.length} coordinates collected`);
 
     // ── Draw node markers ───────────────────────────────────────
     graphNodes.forEach((node) => {
@@ -421,3 +477,199 @@ async function renderSegments(data) {
         map.fitBounds(L.latLngBounds(allNodes), { padding: [100, 100] });
     }
 }
+
+
+// ================================================================
+// FLEET ROUTING — Navigation & Telemetry
+// ================================================================
+
+/**
+ * Reset navigation UI to the "ready" state.
+ */
+function resetNavUI() {
+    btnStartNav.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        Start Navigation`;
+    btnStartNav.classList.remove("navigating");
+    btnWrongTurn.classList.add("hidden");
+    telemetryStatus.classList.add("hidden");
+    telemetryStatus.classList.remove("on-track", "deviated");
+    isNavigating = false;
+    simulateDeviation = false;
+    carStepIndex = 0;
+}
+
+/**
+ * Stop an active navigation session.
+ */
+function stopNavigation() {
+    if (telemetryInterval) {
+        clearInterval(telemetryInterval);
+        telemetryInterval = null;
+    }
+    if (carMarker) {
+        map.removeLayer(carMarker);
+        carMarker = null;
+    }
+    resetNavUI();
+}
+
+/**
+ * Start the navigation simulation.
+ */
+async function startNavigation() {
+    if (!lastRoutePath || lastRoutePath.length < 2) {
+        console.warn("[FLEET] No route to navigate.");
+        return;
+    }
+    if (routePolylineCoords.length < 2) {
+        console.warn("[FLEET] No polyline coordinates for animation.");
+        return;
+    }
+
+    // 1. Register the trip on the backend
+    try {
+        const tripRes = await fetch("/api/start_trip", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                session_id: SESSION_ID,
+                path: lastRoutePath,
+            }),
+        });
+        const tripData = await tripRes.json();
+        console.log("[FLEET] Trip registered:", tripData);
+    } catch (err) {
+        console.error("[FLEET] Failed to register trip:", err);
+        return;
+    }
+
+    // 2. Place the car marker at the start of the route
+    isNavigating = true;
+    carStepIndex = 0;
+    simulateDeviation = false;
+
+    const startPos = routePolylineCoords[0];
+    const carIcon = L.divIcon({
+        className: "car-marker-icon",
+        iconSize: [16, 16],
+        iconAnchor: [8, 8],
+    });
+    carMarker = L.marker(startPos, { icon: carIcon, zIndex: 9999 }).addTo(map);
+
+    // Update UI
+    btnStartNav.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
+        </svg>
+        Stop Navigation`;
+    btnStartNav.classList.add("navigating");
+    btnWrongTurn.classList.remove("hidden");
+    telemetryStatus.classList.remove("hidden");
+    telemetryStatus.classList.remove("deviated");
+    telemetryStatus.classList.add("on-track");
+    telemetryText.textContent = "Telemetry active \u00b7 On track";
+
+    // 3. Start the telemetry polling loop (every 3 seconds)
+    telemetryInterval = setInterval(() => telemetryTick(), 3000);
+}
+
+/**
+ * A single tick of the telemetry loop.
+ * Moves the car, sends position to backend, updates UI.
+ */
+async function telemetryTick() {
+    if (!isNavigating || !carMarker) return;
+
+    let currentPos;
+
+    if (simulateDeviation) {
+        // Move the car 1 km away from the route (perpendicular offset)
+        const basePos = routePolylineCoords[Math.min(carStepIndex, routePolylineCoords.length - 1)];
+        // Offset ~0.009 degrees ≈ ~1 km at Bengaluru's latitude
+        currentPos = [basePos[0] + 0.009, basePos[1] + 0.009];
+        simulateDeviation = false; // One-shot: only deviate for this tick
+
+        // Visual feedback on the car marker
+        const el = carMarker.getElement();
+        if (el) el.classList.add("deviated");
+    } else {
+        // Advance along the route polyline
+        // Move 3-5 points per tick for a smooth simulation
+        const stepsPerTick = Math.max(1, Math.floor(routePolylineCoords.length / 30));
+        carStepIndex = Math.min(carStepIndex + stepsPerTick, routePolylineCoords.length - 1);
+        currentPos = routePolylineCoords[carStepIndex];
+
+        // Reset deviated visual if back on track
+        const el = carMarker.getElement();
+        if (el) el.classList.remove("deviated");
+    }
+
+    // Move the marker
+    carMarker.setLatLng(currentPos);
+
+    // Send telemetry to backend
+    try {
+        const res = await fetch("/api/telemetry", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                session_id: SESSION_ID,
+                lat: currentPos[0],
+                lng: currentPos[1],
+            }),
+        });
+        const data = await res.json();
+        console.log(`[FLEET] Telemetry response: ${data.status} | pos: [${currentPos[0].toFixed(4)}, ${currentPos[1].toFixed(4)}]`);
+
+        // Update telemetry status UI
+        if (data.status === "on_track") {
+            telemetryStatus.classList.remove("deviated");
+            telemetryStatus.classList.add("on-track");
+            telemetryText.textContent = `Telemetry active \u00b7 On track (step ${carStepIndex}/${routePolylineCoords.length - 1})`;
+        } else if (data.status === "deviated") {
+            telemetryStatus.classList.remove("on-track");
+            telemetryStatus.classList.add("deviated");
+            telemetryText.textContent = "\u26a0 Deviation detected! Vehicle off-route";
+        }
+    } catch (err) {
+        console.error("[FLEET] Telemetry ping failed:", err);
+    }
+
+    // Check if the car has reached the end of the route
+    if (carStepIndex >= routePolylineCoords.length - 1 && !simulateDeviation) {
+        console.log("[FLEET] Navigation complete \u2014 reached destination.");
+        telemetryText.textContent = "\u2713 Arrived at destination";
+        telemetryStatus.classList.remove("deviated");
+        telemetryStatus.classList.add("on-track");
+        clearInterval(telemetryInterval);
+        telemetryInterval = null;
+
+        // Keep the car at destination but disable wrong turn
+        btnWrongTurn.classList.add("hidden");
+        btnStartNav.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+            </svg>
+            Start Navigation`;
+        btnStartNav.classList.remove("navigating");
+        isNavigating = false;
+    }
+}
+
+// ── Button Event Listeners ──────────────────────────────────────
+btnStartNav.addEventListener("click", () => {
+    if (isNavigating) {
+        stopNavigation();
+    } else {
+        startNavigation();
+    }
+});
+
+btnWrongTurn.addEventListener("click", () => {
+    if (!isNavigating) return;
+    simulateDeviation = true;
+    console.log("[FLEET] Wrong turn simulation queued \u2014 will deviate on next telemetry tick.");
+});

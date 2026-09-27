@@ -613,6 +613,146 @@ select.input-field {
     background: var(--accent);
 }
 
+/* ── Navigation Controls (Fleet Routing) ─────────────────────────── */
+
+.nav-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 6px;
+}
+
+.nav-buttons-row {
+    display: flex;
+    gap: 8px;
+}
+
+.btn-nav {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    color: var(--text);
+    font-size: 0.78rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all var(--transition);
+    white-space: nowrap;
+}
+
+.btn-nav:hover {
+    background: var(--accent-soft);
+    border-color: rgba(232, 108, 48, 0.3);
+    color: var(--accent);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+
+.btn-nav:active {
+    transform: translateY(0);
+}
+
+.btn-start-nav {
+    background: var(--congestion-low);
+    color: #FFFFFF;
+    border-color: var(--congestion-low);
+}
+
+.btn-start-nav:hover {
+    background: #3D8659;
+    border-color: #3D8659;
+    color: #FFFFFF;
+    box-shadow: 0 4px 14px rgba(74, 155, 107, 0.3);
+}
+
+.btn-start-nav.navigating {
+    background: var(--congestion-high);
+    border-color: var(--congestion-high);
+}
+
+.btn-start-nav.navigating:hover {
+    background: #9E3E32;
+    border-color: #9E3E32;
+    color: #FFFFFF;
+    box-shadow: 0 4px 14px rgba(184, 76, 62, 0.3);
+}
+
+.btn-wrong-turn {
+    background: #FDF2F0;
+    color: var(--congestion-high);
+    border-color: #E8C4BC;
+}
+
+.btn-wrong-turn:hover {
+    background: #F9E0DC;
+    border-color: var(--congestion-high);
+    color: var(--congestion-high);
+    box-shadow: 0 4px 14px rgba(184, 76, 62, 0.15);
+}
+
+/* Telemetry status indicator */
+.telemetry-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    transition: all 0.3s ease;
+}
+
+.telemetry-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-light);
+    flex-shrink: 0;
+    transition: background 0.3s ease;
+}
+
+.telemetry-status.on-track .telemetry-dot {
+    background: var(--congestion-low);
+    box-shadow: 0 0 8px rgba(74, 155, 107, 0.5);
+    animation: telemetry-pulse 1.5s ease-in-out infinite;
+}
+
+.telemetry-status.deviated .telemetry-dot {
+    background: var(--congestion-high);
+    box-shadow: 0 0 8px rgba(184, 76, 62, 0.5);
+    animation: telemetry-pulse 0.6s ease-in-out infinite;
+}
+
+@keyframes telemetry-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+}
+
+/* Car marker on map */
+.car-marker-icon {
+    background: var(--accent);
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 3px solid #FFFFFF;
+    box-shadow: 0 2px 8px rgba(232, 108, 48, 0.5), 0 0 0 2px rgba(232, 108, 48, 0.2);
+    transition: transform 0.4s ease;
+}
+
+.car-marker-icon.deviated {
+    background: var(--congestion-high);
+    box-shadow: 0 2px 8px rgba(184, 76, 62, 0.5), 0 0 0 2px rgba(184, 76, 62, 0.2);
+}
+
 /* ── Loading Spinner ─────────────────────────────────────────────── */
 
 @keyframes spin {

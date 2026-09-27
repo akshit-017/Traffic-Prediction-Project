@@ -1,25 +1,48 @@
-# Use the official lightweight Python image.
-# https://hub.docker.com/_/python
+# ═══════════════════════════════════════════════════════════════════
+# Dockerfile — Bengaluru Traffic Prediction System
+# Target: Hugging Face Spaces (Docker SDK, Free Tier)
+# ═══════════════════════════════════════════════════════════════════
+#
+# CRITICAL: This app uses in-memory dicts (edge_counters, active_sessions)
+# for fleet state. It MUST run on a SINGLE worker process to avoid
+# state fragmentation. The CMD below enforces this.
+# ═══════════════════════════════════════════════════════════════════
+
 FROM python:3.10-slim
 
-# Set up a non-root user to run the app (Hugging Face Spaces requirement)
+# ── System deps (none needed beyond slim's defaults) ─────────────
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Non-root user (mandatory for HF Spaces) ─────────────────────
 RUN useradd -m -u 1000 user
 USER user
 ENV PATH="/home/user/.local/bin:$PATH"
 
-# Set working directory
+# ── Working directory ────────────────────────────────────────────
 WORKDIR /app
 
-# Copy requirements file and install dependencies
+# ── Install Python dependencies ─────────────────────────────────
 COPY --chown=user requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# ── Copy application code ───────────────────────────────────────
+# .dockerignore excludes Raw/, notebooks/, data/, outputs/,
+# train_models.py, and the 727 MB best_traffic_model.pkl if desired
 COPY --chown=user . .
 
-# Expose port 7860 as required by Hugging Face Spaces
+# ── Expose port 7860 (mandatory for Hugging Face Spaces) ────────
 EXPOSE 7860
 
-# Run the web service on container startup using gunicorn
-# 1 worker and 8 threads is a good starting point for simple apps
-CMD ["gunicorn", "-b", "0.0.0.0:7860", "-w", "1", "--threads", "8", "--timeout", "0", "app:app"]
+# ── Environment ─────────────────────────────────────────────────
+ENV FLASK_APP=app.py
+ENV FLASK_ENV=production
+ENV PYTHONUNBUFFERED=1
+
+# ── Run Flask dev server (single process for stateful dicts) ────
+# Using Flask's built-in server guarantees a single process.
+# For production-grade single-worker, use gunicorn:
+#   CMD ["gunicorn", "-b", "0.0.0.0:7860", "-w", "1", "--threads", "4", "--timeout", "120", "app:app"]
+CMD ["flask", "run", "--host=0.0.0.0", "--port=7860"]
