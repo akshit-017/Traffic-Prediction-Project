@@ -14,3 +14,4 @@ outputs/
 # SQLite database (local search history)
 traffic_history.db
 
+
