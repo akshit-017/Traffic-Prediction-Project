@@ -217,17 +217,49 @@ async function fetchRoadGeometry(lat1, lng1, lat2, lng2) {
 }
 
 /**
+ * Squared distance between two [lat, lng] points (for fast comparison only).
+ */
+function sqDist(a, b) {
+    const dlat = a[0] - b[0], dlng = a[1] - b[1];
+    return dlat * dlat + dlng * dlng;
+}
+
+/**
+ * Ensure a polyline array runs from (lat1, lng1) → (lat2, lng2).
+ *
+ * The graph is undirected, so pre-baked road_coords may be stored in
+ * the reverse direction.  We check whether the polyline's first point
+ * is closer to the segment's origin or destination and reverse if needed.
+ */
+function orientCoords(coords, lat1, lng1, lat2, lng2) {
+    const origin = [lat1, lng1];
+    const first  = coords[0];
+    const last   = coords[coords.length - 1];
+
+    // If the first point of the polyline is closer to the *destination*
+    // than to the origin, the array is backwards — reverse it.
+    if (sqDist(first, origin) > sqDist(last, origin)) {
+        return coords.slice().reverse();
+    }
+    return coords;
+}
+
+/**
  * Get road-following coords for an edge.
  * Priority: 1) pre-baked road_coords  2) live OSRM  3) straight line
+ *
+ * All returned arrays are guaranteed to run origin → destination.
  */
 async function getEdgeCoords(lat1, lng1, lat2, lng2, prebakedCoords) {
     // 1. Use pre-baked road coordinates from the server (works offline)
     if (prebakedCoords && Array.isArray(prebakedCoords) && prebakedCoords.length >= 2) {
-        return prebakedCoords;
+        return orientCoords(prebakedCoords, lat1, lng1, lat2, lng2);
     }
     // 2. Try live OSRM fetch
     const roadCoords = await fetchRoadGeometry(lat1, lng1, lat2, lng2);
-    if (roadCoords && roadCoords.length >= 2) return roadCoords;
+    if (roadCoords && roadCoords.length >= 2) {
+        return orientCoords(roadCoords, lat1, lng1, lat2, lng2);
+    }
     // 3. Fallback: straight line
     return [[lat1, lng1], [lat2, lng2]];
 }
@@ -424,6 +456,12 @@ async function renderSegments(data) {
         });
 
     console.log(`[FLEET] Route polyline: ${routePolylineCoords.length} coordinates collected`);
+    if (routePolylineCoords.length >= 2) {
+        const first = routePolylineCoords[0];
+        const last  = routePolylineCoords[routePolylineCoords.length - 1];
+        console.log(`[FLEET]   Start: [${first[0].toFixed(4)}, ${first[1].toFixed(4)}]`);
+        console.log(`[FLEET]   End:   [${last[0].toFixed(4)}, ${last[1].toFixed(4)}]`);
+    }
 
     // ── Draw node markers ───────────────────────────────────────
     graphNodes.forEach((node) => {
