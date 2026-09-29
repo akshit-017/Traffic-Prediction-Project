@@ -245,20 +245,134 @@ function orientCoords(coords, lat1, lng1, lat2, lng2) {
 }
 
 /**
+ * Compute the great-circle distance in km between two [lat, lng] points.
+ */
+function haversineDist(a, b) {
+    const R = 6371; // km
+    const dLat = (b[0] - a[0]) * Math.PI / 180;
+    const dLng = (b[1] - a[1]) * Math.PI / 180;
+    const lat1r = a[0] * Math.PI / 180;
+    const lat2r = b[0] * Math.PI / 180;
+    const x = Math.sin(dLat / 2) ** 2 +
+              Math.cos(lat1r) * Math.cos(lat2r) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+/**
+ * Compute the total length of a polyline in km.
+ */
+function polylineLength(coords) {
+    let total = 0;
+    for (let i = 0; i < coords.length - 1; i++) {
+        total += haversineDist(coords[i], coords[i + 1]);
+    }
+    return total;
+}
+
+/**
+ * Clamp a polyline so it doesn't extend far beyond the origin or
+ * destination.  OSRM road_coords often overshoot the graph nodes
+ * because OSRM snaps to the nearest road segment, which may be
+ * past the intended node.  This trims the overshooting tail/head.
+ *
+ * Strategy: walk from start→end and stop once the remaining distance
+ * to the destination starts increasing (we've passed it).
+ * Similarly for the beginning relative to the origin.
+ */
+function clampToEndpoints(coords, origin, destination) {
+    if (coords.length <= 3) return coords;
+
+    // Trim the end: stop where distance to destination starts increasing
+    let endIdx = coords.length - 1;
+    let minDistToDest = haversineDist(coords[endIdx], destination);
+    for (let i = coords.length - 2; i >= Math.max(0, coords.length - 80); i--) {
+        const d = haversineDist(coords[i], destination);
+        if (d < minDistToDest + 0.01) {
+            // Still approaching or at minimum — keep going back
+            minDistToDest = Math.min(minDistToDest, d);
+        } else if (d > minDistToDest + 0.15) {
+            // We've gone past the destination — trim here
+            endIdx = i + 1;
+            break;
+        }
+    }
+
+    // Trim the start: stop where distance to origin starts increasing
+    let startIdx = 0;
+    let minDistToOrigin = haversineDist(coords[0], origin);
+    for (let i = 1; i <= Math.min(coords.length - 1, 80); i++) {
+        const d = haversineDist(coords[i], origin);
+        if (d < minDistToOrigin + 0.01) {
+            minDistToOrigin = Math.min(minDistToOrigin, d);
+        } else if (d > minDistToOrigin + 0.15) {
+            startIdx = Math.max(0, i - 1);
+            break;
+        }
+    }
+
+    if (startIdx > 0 || endIdx < coords.length - 1) {
+        const clamped = coords.slice(startIdx, endIdx + 1);
+        if (clamped.length >= 2) return clamped;
+    }
+
+    return coords;
+}
+
+/**
  * Get road-following coords for an edge.
  * Priority: 1) pre-baked road_coords  2) live OSRM  3) straight line
  *
  * All returned arrays are guaranteed to run origin → destination.
+ * Coordinates are clamped so they don't overshoot the endpoints,
+ * and overly circuitous paths (>3x direct distance) are rejected.
  */
 async function getEdgeCoords(lat1, lng1, lat2, lng2, prebakedCoords) {
+    const origin = [lat1, lng1];
+    const destination = [lat2, lng2];
+    const directDist = haversineDist(origin, destination);
+
+    // Helper: validate and clamp a set of road coordinates
+    function processCoords(raw) {
+        let coords = orientCoords(raw, lat1, lng1, lat2, lng2);
+
+        // Reject paths that are absurdly circuitous (>3x direct distance)
+        const routeDist = polylineLength(coords);
+        if (directDist > 0.1 && routeDist / directDist > 3.5) {
+            console.warn(
+                `[ROUTE] Rejecting circuitous path: ` +
+                `${routeDist.toFixed(1)}km vs ${directDist.toFixed(1)}km direct ` +
+                `(${(routeDist / directDist).toFixed(1)}x)`
+            );
+            return null; // fall through to straight line
+        }
+
+        // Clamp to endpoints (trim overshooting OSRM coords)
+        coords = clampToEndpoints(coords, origin, destination);
+
+        // Ensure the polyline starts/ends very close to origin/destination
+        // by prepending/appending the node coordinates if needed
+        if (coords.length >= 2) {
+            if (haversineDist(coords[0], origin) > 0.05) {
+                coords = [origin, ...coords];
+            }
+            if (haversineDist(coords[coords.length - 1], destination) > 0.05) {
+                coords = [...coords, destination];
+            }
+        }
+
+        return coords;
+    }
+
     // 1. Use pre-baked road coordinates from the server (works offline)
     if (prebakedCoords && Array.isArray(prebakedCoords) && prebakedCoords.length >= 2) {
-        return orientCoords(prebakedCoords, lat1, lng1, lat2, lng2);
+        const result = processCoords(prebakedCoords);
+        if (result && result.length >= 2) return result;
     }
     // 2. Try live OSRM fetch
     const roadCoords = await fetchRoadGeometry(lat1, lng1, lat2, lng2);
     if (roadCoords && roadCoords.length >= 2) {
-        return orientCoords(roadCoords, lat1, lng1, lat2, lng2);
+        const result = processCoords(roadCoords);
+        if (result && result.length >= 2) return result;
     }
     // 3. Fallback: straight line
     return [[lat1, lng1], [lat2, lng2]];
@@ -371,6 +485,100 @@ btnRoute.addEventListener("click", async () => {
 // MAP RENDERING — Per-segment congestion coloring
 // ================================================================
 
+/**
+ * Find how many trailing points of `prevCoords` overlap with leading
+ * points of `nextCoords`.  Two points are "the same" when they are
+ * within ~11 m of each other (0.0001° ≈ 11 m at Bengaluru's latitude).
+ *
+ * Returns the number of leading points to trim from `nextCoords`.
+ */
+function findOverlapCount(prevCoords, nextCoords) {
+    if (!prevCoords || !nextCoords || prevCoords.length < 2 || nextCoords.length < 2) {
+        return 0;
+    }
+
+    const THRESH = 0.0001; // ~11 m tolerance for matching coordinates
+
+    function ptClose(a, b) {
+        return Math.abs(a[0] - b[0]) < THRESH && Math.abs(a[1] - b[1]) < THRESH;
+    }
+
+    // Strategy: walk backwards from the end of prevCoords and try to
+    // find the longest prefix of nextCoords that matches a suffix of
+    // prevCoords.  The overlap happens because OSRM routes both edges
+    // through the same roads near their shared node.
+    //
+    // We look for the first point in nextCoords that matches a point
+    // near the end of prevCoords, then verify the sequences align.
+
+    const maxCheck = Math.min(prevCoords.length, nextCoords.length, 200);
+    let bestOverlap = 0;
+
+    // For each candidate start in nextCoords (up to maxCheck points),
+    // check if nextCoords[0..k] matches prevCoords[end-k..end].
+    for (let startInPrev = prevCoords.length - 1;
+         startInPrev >= Math.max(0, prevCoords.length - maxCheck);
+         startInPrev--) {
+        if (ptClose(prevCoords[startInPrev], nextCoords[0])) {
+            // Found a candidate match — verify how far it extends
+            let matchLen = 1;
+            while (
+                matchLen < nextCoords.length &&
+                startInPrev + matchLen < prevCoords.length &&
+                ptClose(prevCoords[startInPrev + matchLen], nextCoords[matchLen])
+            ) {
+                matchLen++;
+            }
+            // We want the overlap that reaches closest to the end of prevCoords
+            // (i.e. startInPrev + matchLen should be near prevCoords.length)
+            if (matchLen >= 2 && startInPrev + matchLen >= prevCoords.length - 2) {
+                bestOverlap = Math.max(bestOverlap, matchLen);
+            }
+        }
+    }
+
+    return bestOverlap;
+}
+
+/**
+ * Trim overlapping coordinates between consecutive segments.
+ * When OSRM generates road geometry for edges A→B and B→C, they
+ * often share road coordinates near node B.  This causes the same
+ * road section to be drawn twice with potentially different colors.
+ *
+ * This function removes the overlapping leading portion of each
+ * segment that was already covered by the previous segment.
+ */
+function trimConsecutiveOverlaps(resolvedSegments) {
+    if (resolvedSegments.length <= 1) return resolvedSegments;
+
+    const trimmed = [resolvedSegments[0]]; // first segment stays as-is
+
+    for (let i = 1; i < resolvedSegments.length; i++) {
+        const prev = trimmed[trimmed.length - 1].latlngs;
+        const curr = resolvedSegments[i].latlngs;
+
+        const overlapCount = findOverlapCount(prev, curr);
+
+        if (overlapCount > 0) {
+            console.log(
+                `[ROUTE] Trimmed ${overlapCount} overlapping coords ` +
+                `between segment ${i - 1} and ${i}`
+            );
+            // Keep at least 1 overlap point so the line connects smoothly
+            const trimStart = Math.max(1, overlapCount - 1);
+            trimmed.push({
+                ...resolvedSegments[i],
+                latlngs: curr.slice(trimStart),
+            });
+        } else {
+            trimmed.push(resolvedSegments[i]);
+        }
+    }
+
+    return trimmed;
+}
+
 async function renderSegments(data) {
     clearMap();
     routePolylineCoords = []; // Reset for navigation
@@ -394,11 +602,27 @@ async function renderSegments(data) {
     const nodeDict = {};
     graphNodes.forEach(n => { nodeDict[n.id] = n; });
 
-    // ── Draw each segment with its congestion color ─────────────
-    const segmentPromises = segments.map(async (seg, idx) => {
+    // ── Phase 1: Resolve all segment coordinates (in order) ─────
+    const resolvedRaw = [];
+    for (let idx = 0; idx < segments.length; idx++) {
+        const seg = segments[idx];
         const [[lat1, lng1], [lat2, lng2]] = seg.coordinates;
         const latlngs = await getEdgeCoords(lat1, lng1, lat2, lng2, seg.road_coords);
+        resolvedRaw.push({ idx, seg, latlngs });
+        allNodes.push([lat1, lng1]);
+        allNodes.push([lat2, lng2]);
+    }
+
+    // ── Phase 2: Trim overlapping coords between consecutive segments
+    const resolvedSegments = trimConsecutiveOverlaps(resolvedRaw);
+
+    // ── Phase 3: Render each (trimmed) segment on the map ───────
+    for (const resolved of resolvedSegments) {
+        const { seg, latlngs } = resolved;
         const color = seg.color;
+
+        // Skip segments that got trimmed to nothing
+        if (latlngs.length < 2) continue;
 
         // Glow / shadow layer for depth
         const glow = L.polyline(latlngs, {
@@ -432,28 +656,17 @@ async function renderSegments(data) {
         });
 
         mapLayers.push(line);
+    }
 
-        // Collect coordinates for bounds AND for navigation animation
-        allNodes.push([lat1, lng1]);
-        allNodes.push([lat2, lng2]);
-
-        // Return the resolved coords so we can build the animation path
-        return { idx, latlngs };
+    // ── Build navigation polyline from trimmed segments ──────────
+    resolvedSegments.forEach((seg, i) => {
+        if (i === 0) {
+            routePolylineCoords.push(...seg.latlngs);
+        } else {
+            // Skip the first point of subsequent segments to avoid duplicates
+            routePolylineCoords.push(...seg.latlngs.slice(1));
+        }
     });
-
-    const resolvedSegments = await Promise.all(segmentPromises);
-
-    // Build the full polyline coordinate list (in order) for car animation
-    resolvedSegments
-        .sort((a, b) => a.idx - b.idx)
-        .forEach((seg, i) => {
-            if (i === 0) {
-                routePolylineCoords.push(...seg.latlngs);
-            } else {
-                // Skip the first point of subsequent segments to avoid duplicates
-                routePolylineCoords.push(...seg.latlngs.slice(1));
-            }
-        });
 
     console.log(`[FLEET] Route polyline: ${routePolylineCoords.length} coordinates collected`);
     if (routePolylineCoords.length >= 2) {
