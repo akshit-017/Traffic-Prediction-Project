@@ -6,7 +6,9 @@ class TrafficPreprocessor:
     def __init__(self, file_path):
         self.file_path = file_path
         self.scaler = StandardScaler()
-        self.label_encoder = LabelEncoder()
+        self.area_encoder = LabelEncoder()
+        self.road_encoder = LabelEncoder()
+        self.weather_encoder = LabelEncoder()
 
     def load_and_clean(self):
         print("Loading and cleaning with Peak-Hour triggers...")
@@ -29,13 +31,13 @@ class TrafficPreprocessor:
         df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
         df['is_peak_hour'] = df['hour'].isin([8, 9, 10, 17, 18, 19, 20]).astype(int)
         
-        # Encoding Categories
+        # Encoding Categories (separate encoder per column)
         if 'area name' in df.columns:
-            df['area_encoded'] = self.label_encoder.fit_transform(df['area name'])
+            df['area_encoded'] = self.area_encoder.fit_transform(df['area name'])
         if 'road/intersection name' in df.columns:
-            df['road_encoded'] = self.label_encoder.fit_transform(df['road/intersection name'])
+            df['road_encoded'] = self.road_encoder.fit_transform(df['road/intersection name'])
         if 'weather conditions' in df.columns:
-            df['weather_encoded'] = self.label_encoder.fit_transform(df['weather conditions'])
+            df['weather_encoded'] = self.weather_encoder.fit_transform(df['weather conditions'])
             
         # Deep Lagging (Memory)
         df['vol_1_step_ago'] = df['traffic volume'].shift(1)

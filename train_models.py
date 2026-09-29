@@ -36,7 +36,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # ── Paths ────────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-RAW_DIR = os.path.join(PROJECT_ROOT, "RAW")
+RAW_DIR = os.path.join(PROJECT_ROOT, "Raw")
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 OUTPUT_PKL = os.path.join(MODELS_DIR, "best_traffic_model.pkl")
 

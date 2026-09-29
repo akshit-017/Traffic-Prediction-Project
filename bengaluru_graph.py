@@ -139,7 +139,6 @@ EDGES = [
     ("Yelahanka",       "Thanisandra",        6.5),
     ("Yelahanka",       "Peenya",             10.0),
     ("Peenya",          "Hebbal",             7.0),
-    ("Sadashivanagar",  "Hebbal",             4.5),
 ]
 
 

@@ -28,7 +28,7 @@ from database import init_db, log_telemetry
 
 # ── Constants ────────────────────────────────────────────────────────
 IST = timezone(timedelta(hours=5, minutes=30))
-TOMTOM_API_KEY = os.environ.get("TOMTOM_API_KEY", "s7siMcrVMhjeY4ljVp3xFcIoVSacpr9t")
+TOMTOM_API_KEY = os.environ.get("TOMTOM_API_KEY")
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 MODEL_PATH = os.path.join(MODELS_DIR, "best_traffic_model.pkl")
 
@@ -149,7 +149,7 @@ def _get_ist_datetime(departure_time: str = None) -> datetime:
 
 def _is_peak_hour(hour: float) -> int:
     """Return 1 if hour falls within morning (08-11:30) or evening (17-20:30) peak."""
-    return int((8 <= hour <= 11.5) or (17 <= hour <= 20.5))
+    return int((8 <= hour < 11.5) or (17 <= hour < 20.5))
 
 
 def _congestion_color(speed_kmh: float) -> str:
@@ -229,8 +229,9 @@ def _assign_live_weights(graph: nx.Graph) -> tuple[bool, str]:
             # Fallback to realistic speed profile
             fallback = True
             speed = _get_speed_for_time(hour, is_weekend)
-            # Add per-edge variation (±15%) for realism
-            variation = random.uniform(0.85, 1.15)
+            # Deterministic per-edge variation (±15%) for realism
+            edge_hash = hash((u, v)) % 10000 / 10000.0  # 0.0 – 1.0
+            variation = 0.85 + edge_hash * 0.30  # 0.85 – 1.15
             effective_speed = speed * variation
             weight = (dist_km / effective_speed) * 60.0
             # Estimate congestion from speed vs free-flow
@@ -380,8 +381,9 @@ def _assign_predictive_weights(graph: nx.Graph, departure: datetime) -> tuple[bo
             effective_speed = max(5.0, effective_speed)  # minimum 5 km/h
             weight = (dist_km / effective_speed) * 60.0
 
-            # Add small per-edge variation for realism
-            variation = random.uniform(0.92, 1.08)
+            # Deterministic per-edge variation for realism
+            edge_hash = hash((u, v)) % 10000 / 10000.0
+            variation = 0.92 + edge_hash * 0.16  # 0.92 – 1.08
             weight *= variation
 
             congestion = ml_congestion
@@ -522,8 +524,9 @@ def predict_route():
             predicted_time = _predict_edge_travel_time(
                 u, v, dist_km, hour_of_day, day_of_week, is_peak, base_speed
             )
-            # Add small per-edge randomness for realism in predictive mode
-            variation = random.uniform(0.90, 1.10)
+            # Deterministic per-edge variation for realism in predictive mode
+            edge_hash = hash((u, v)) % 10000 / 10000.0
+            variation = 0.90 + edge_hash * 0.20  # 0.90 – 1.10
             predicted_time *= variation
 
         # ── Fleet congestion penalty ─────────────────────────────

@@ -10,10 +10,7 @@
 
 FROM python:3.10-slim
 
-# ── System deps (none needed beyond slim's defaults) ─────────────
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
+# ── System deps (slim base has everything we need) ───────────
 
 # ── Non-root user (mandatory for HF Spaces) ─────────────────────
 RUN useradd -m -u 1000 user
