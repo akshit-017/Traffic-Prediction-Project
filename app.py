@@ -532,7 +532,7 @@ def predict_route():
         # ── Fleet congestion penalty ─────────────────────────────
         fleet_count = edge_counters.get((u, v), 0) + edge_counters.get((v, u), 0)
         if fleet_count > 0:
-            predicted_time = predicted_time * (1 + (fleet_count * 0.15))
+            predicted_time = predicted_time * (1.15 ** fleet_count)
 
         data["weight"] = round(max(0.3, predicted_time), 2)
 
@@ -667,7 +667,7 @@ def get_route():
     for u, v, edata in G.edges(data=True):
         fleet_count = edge_counters.get((u, v), 0) + edge_counters.get((v, u), 0)
         if fleet_count > 0:
-            edata["weight"] = round(edata["weight"] * (1 + (fleet_count * 0.15)), 2)
+            edata["weight"] = round(edata["weight"] * (1.15 ** fleet_count), 2)
 
     # ── Dijkstra pathfinding ──────────────────────────────────────
     path, total_distance_km, travel_time_min = _compute_route(G, source, destination)
