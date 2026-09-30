@@ -233,12 +233,17 @@ function sqDist(a, b) {
  */
 function orientCoords(coords, lat1, lng1, lat2, lng2) {
     const origin = [lat1, lng1];
+    const destination = [lat2, lng2];
     const first  = coords[0];
     const last   = coords[coords.length - 1];
 
-    // If the first point of the polyline is closer to the *destination*
-    // than to the origin, the array is backwards — reverse it.
-    if (sqDist(first, origin) > sqDist(last, origin)) {
+    // Use both origin and destination to determine direction.
+    // Compare: is (first→origin + last→dest) shorter than (first→dest + last→origin)?
+    // If not, the polyline is reversed.
+    const forwardCost  = sqDist(first, origin) + sqDist(last, destination);
+    const reverseCost  = sqDist(first, destination) + sqDist(last, origin);
+
+    if (reverseCost < forwardCost) {
         return coords.slice().reverse();
     }
     return coords;
@@ -667,6 +672,27 @@ async function renderSegments(data) {
             routePolylineCoords.push(...seg.latlngs.slice(1));
         }
     });
+
+    // ── Safety net: verify the polyline runs source → destination ─
+    // Use actual node positions to check direction; reverse if backwards.
+    if (routePolylineCoords.length >= 2 && path.length >= 2) {
+        const sourceNode = nodeDict[path[0]];
+        const destNode   = nodeDict[path[path.length - 1]];
+        if (sourceNode && destNode) {
+            const first = routePolylineCoords[0];
+            const last  = routePolylineCoords[routePolylineCoords.length - 1];
+            const sourcePos = [sourceNode.lat, sourceNode.lng];
+            const destPos   = [destNode.lat, destNode.lng];
+
+            const forwardCost = sqDist(first, sourcePos) + sqDist(last, destPos);
+            const reverseCost = sqDist(first, destPos) + sqDist(last, sourcePos);
+
+            if (reverseCost < forwardCost) {
+                routePolylineCoords.reverse();
+                console.log("[FLEET] Polyline was reversed to run source → destination.");
+            }
+        }
+    }
 
     console.log(`[FLEET] Route polyline: ${routePolylineCoords.length} coordinates collected`);
     if (routePolylineCoords.length >= 2) {
