@@ -11,6 +11,9 @@ __pycache__/
 models/
 outputs/
 
+# Raw training datasets (502+ MB) — only needed locally for retraining
+Raw/
+
 # SQLite database (local search history)
 traffic_history.db
 
