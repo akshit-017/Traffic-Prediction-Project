@@ -754,7 +754,8 @@ def start_trip():
         { "session_id": "abc-123", "path": ["NodeA", "NodeB", "NodeC"] }
 
     Increments edge_counters for every edge on the path and stores
-    the session in active_sessions.
+    the session in active_sessions.  Multiple concurrent sessions are
+    fully supported — this only touches the counters for THIS session.
     """
     payload = request.json or {}
     session_id = payload.get("session_id", "").strip()
@@ -763,15 +764,27 @@ def start_trip():
     if not session_id or len(path) < 2:
         return jsonify({"error": "session_id and a path with ≥2 nodes are required."}), 400
 
-    # If this session already has edges registered, decrement them first
+    print(f"[START_TRIP] Called: session={session_id!r}, path_nodes={len(path)}, "
+          f"currently_active_sessions={len(active_sessions)}, "
+          f"current_edge_total={sum(edge_counters.values())}")
+
+    # ── Release this session's OLD edges before re-registering ────
+    # This handles the case where the same session_id re-routes mid-trip.
+    # IMPORTANT: we only decrement edges belonging to THIS session —
+    # other sessions' counters are completely untouched.
+    released_count = 0
     if session_id in active_sessions:
-        for edge in active_sessions[session_id].get("assigned_edges", []):
+        old_edges = active_sessions[session_id].get("assigned_edges", [])
+        print(f"[START_TRIP] Re-registering existing session={session_id!r}: "
+              f"releasing {len(old_edges)} old edges first")
+        for edge in old_edges:
             key = tuple(edge)
             edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
             if edge_counters[key] == 0:
                 edge_counters.pop(key, None)
+            released_count += 1
 
-    # Build edge list and increment counters
+    # ── Register new edges and increment counters ─────────────────
     edges = []
     for i in range(len(path) - 1):
         edge = (path[i], path[i + 1])
@@ -781,12 +794,76 @@ def start_trip():
     active_sessions[session_id] = {
         "assigned_edges": edges,
         "last_seen": _time.time(),
+        "source": path[0],
+        "destination": path[-1],
+        "registered_at": _time.time(),
     }
 
-    print(f"[FLEET] Trip started: session={session_id}, edges={len(edges)}, "
-          f"total tracked edges={sum(edge_counters.values())}")
+    print(f"[START_TRIP] Registered: session={session_id!r}, "
+          f"new_edges={len(edges)}, released_old_edges={released_count}, "
+          f"total_active_sessions={len(active_sessions)}, "
+          f"total_edge_slots={sum(edge_counters.values())}")
 
-    return jsonify({"status": "registered", "edges_tracked": len(edges)})
+    return jsonify({
+        "status": "registered",
+        "session_id": session_id,
+        "edges_tracked": len(edges),
+        "total_active_sessions": len(active_sessions),
+    })
+
+
+@app.route("/api/end_trip", methods=["POST"])
+def end_trip():
+    """
+    Explicitly release a session's edge slots from fleet state.
+
+    Accepts:
+        { "session_id": "abc-123", "reason": "completed" | "rerouted" | "cancelled" }
+
+    Call this when:
+      - Navigation completes (car reaches destination)
+      - The user selects a new route (rerouted)
+      - The user manually stops navigation (cancelled)
+
+    This is safe to call multiple times for the same session_id;
+    if the session is already gone it returns {"status": "already_gone"}.
+    Other active sessions are NEVER affected.
+    """
+    payload = request.json or {}
+    session_id = payload.get("session_id", "").strip()
+    reason = payload.get("reason", "unknown")
+
+    if not session_id:
+        return jsonify({"error": "session_id is required."}), 400
+
+    session = active_sessions.get(session_id)
+    if not session:
+        print(f"[END_TRIP] Session {session_id!r} not found (already gone or never started). "
+              f"reason={reason!r}")
+        return jsonify({"status": "already_gone", "session_id": session_id})
+
+    # Release only this session's edges
+    edges = session.get("assigned_edges", [])
+    for edge in edges:
+        key = tuple(edge)
+        edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+        if edge_counters[key] == 0:
+            edge_counters.pop(key, None)
+
+    active_sessions.pop(session_id, None)
+
+    print(f"[END_TRIP] Released: session={session_id!r}, reason={reason!r}, "
+          f"edges_released={len(edges)}, "
+          f"remaining_active_sessions={len(active_sessions)}, "
+          f"remaining_edge_slots={sum(edge_counters.values())}")
+
+    return jsonify({
+        "status": "released",
+        "session_id": session_id,
+        "edges_released": len(edges),
+        "reason": reason,
+        "remaining_active_sessions": len(active_sessions),
+    })
 
 
 @app.route("/api/telemetry", methods=["POST"])

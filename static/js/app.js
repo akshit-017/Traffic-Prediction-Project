@@ -5,10 +5,15 @@
 // Fleet Routing: telemetry loop, car animation, deviation detection
 // ================================================================
 
-// ── Session ID (generated once per page load) ───────────────────
-const SESSION_ID = 'ses-' + Math.random().toString(36).substring(2, 10) +
-                   '-' + Date.now().toString(36);
-console.log('[FLEET] Session ID:', SESSION_ID);
+// ── Session ID (unique per navigation trip, regenerated on each Start) ──
+// Using `let` so we can assign a fresh ID for every new trip.
+// This prevents trip-2 from touching trip-1's edge counters on /api/start_trip.
+let SESSION_ID = _generateSessionId();
+function _generateSessionId() {
+    return 'ses-' + Math.random().toString(36).substring(2, 10) +
+           '-' + Date.now().toString(36);
+}
+console.log('[FLEET] Initial Session ID:', SESSION_ID);
 
 // ── Map Initialization ──────────────────────────────────────────
 const map = L.map("map", {
@@ -391,8 +396,10 @@ btnRoute.addEventListener("click", async () => {
     hideError();
     resultsDashboard.classList.add("hidden");
 
-    // Stop any active navigation when computing a new route
-    stopNavigation();
+    // Stop any active navigation when computing a new route.
+    // Pass reason='rerouted' so /api/end_trip releases old edge_counters
+    // BEFORE the new route is computed (prevents counter double-counting).
+    stopNavigation('rerouted');
 
     const source = sourceSelect.value;
     const destination = destSelect.value;
@@ -780,8 +787,12 @@ function resetNavUI() {
 
 /**
  * Stop an active navigation session.
+ * Notifies the backend via /api/end_trip so edge_counters are released
+ * immediately — without waiting for the stale-session cleanup timeout.
+ *
+ * @param {string} reason - 'cancelled' | 'rerouted' | 'completed'
  */
-function stopNavigation() {
+function stopNavigation(reason = 'cancelled') {
     if (telemetryInterval) {
         clearInterval(telemetryInterval);
         telemetryInterval = null;
@@ -790,6 +801,21 @@ function stopNavigation() {
         map.removeLayer(carMarker);
         carMarker = null;
     }
+
+    // Tell the backend to release this session's edge slots.
+    // Fire-and-forget: we don't block the UI on this response.
+    if (isNavigating || reason === 'rerouted') {
+        const sid = SESSION_ID;
+        fetch('/api/end_trip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sid, reason: reason }),
+        })
+        .then(r => r.json())
+        .then(d => console.log(`[FLEET] end_trip (${reason}):`, d))
+        .catch(e => console.warn('[FLEET] end_trip call failed (non-critical):', e));
+    }
+
     resetNavUI();
 }
 
@@ -806,7 +832,13 @@ async function startNavigation() {
         return;
     }
 
-    // 1. Register the trip on the backend
+    // 1. Assign a fresh session ID for this new navigation trip.
+    // Each trip gets its own unique ID so concurrent trips are independent
+    // and re-routing never touches another session's edge_counters.
+    SESSION_ID = _generateSessionId();
+    console.log('[FLEET] New trip session ID:', SESSION_ID);
+
+    // 2. Register the trip on the backend
     try {
         const tripRes = await fetch("/api/start_trip", {
             method: "POST",
@@ -945,6 +977,17 @@ async function telemetryTick() {
         telemetryStatus.classList.add("on-track");
         clearInterval(telemetryInterval);
         telemetryInterval = null;
+
+        // Release edge slots on the backend — trip is complete
+        const sid = SESSION_ID;
+        fetch('/api/end_trip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sid, reason: 'completed' }),
+        })
+        .then(r => r.json())
+        .then(d => console.log('[FLEET] end_trip (completed):', d))
+        .catch(e => console.warn('[FLEET] end_trip failed on completion:', e));
 
         // Keep the car at destination but disable wrong turn
         btnWrongTurn.classList.add("hidden");
