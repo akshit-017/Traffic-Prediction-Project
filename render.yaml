@@ -4,7 +4,7 @@ services:
   - type: web
     name: traffic-prediction
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python optimize_model.py
     startCommand: gunicorn -w 1 --threads 4 --timeout 120 app:app
     envVars:
       - key: PYTHON_VERSION
