@@ -849,8 +849,8 @@ async function startNavigation() {
     telemetryStatus.classList.add("on-track");
     telemetryText.textContent = "Telemetry active \u00b7 On track";
 
-    // 3. Start the telemetry polling loop (every 3 seconds)
-    telemetryInterval = setInterval(() => telemetryTick(), 3000);
+    // 3. Start the telemetry polling loop (every 2 seconds)
+    telemetryInterval = setInterval(() => telemetryTick(), 2000);
 }
 
 /**
@@ -898,8 +898,17 @@ async function telemetryTick() {
                 lng: currentPos[1],
             }),
         });
+
+        // Log the raw HTTP status so 404 (no_session) surfaces in DevTools
+        if (!res.ok) {
+            console.warn(`[FLEET] Telemetry HTTP ${res.status} for session=${SESSION_ID}. ` +
+                         `This usually means /api/start_trip wasn't called yet, ` +
+                         `or the session was evicted after a deviation.`);
+        }
+
         const data = await res.json();
-        console.log(`[FLEET] Telemetry response: ${data.status} | pos: [${currentPos[0].toFixed(4)}, ${currentPos[1].toFixed(4)}]`);
+        console.log(`[FLEET] Telemetry response: HTTP ${res.status} | status=${data.status} | ` +
+                    `pos: [${currentPos[0].toFixed(4)}, ${currentPos[1].toFixed(4)}]`);
 
         // Update telemetry status UI
         if (data.status === "on_track") {
@@ -910,6 +919,19 @@ async function telemetryTick() {
             telemetryStatus.classList.remove("on-track");
             telemetryStatus.classList.add("deviated");
             telemetryText.textContent = "\u26a0 Deviation detected! Vehicle off-route";
+        } else if (data.status === "no_session") {
+            console.error("[FLEET] Server has no session for", SESSION_ID,
+                          "\u2014 re-registering trip...");
+            // Attempt to re-register the trip automatically
+            if (lastRoutePath && lastRoutePath.length >= 2) {
+                fetch("/api/start_trip", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ session_id: SESSION_ID, path: lastRoutePath }),
+                }).then(r => r.json()).then(d => {
+                    console.log("[FLEET] Auto re-register result:", d);
+                }).catch(e => console.error("[FLEET] Re-register failed:", e));
+            }
         }
     } catch (err) {
         console.error("[FLEET] Telemetry ping failed:", err);

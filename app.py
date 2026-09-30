@@ -806,11 +806,23 @@ def telemetry():
     lat = payload.get("lat")
     lng = payload.get("lng")
 
+    # ── Debug: log every incoming ping to Render stdout ──────────
+    print(f"[TELEMETRY] Ping received: session={session_id!r}, "
+          f"lat={lat}, lng={lng}, "
+          f"active_sessions={len(active_sessions)}, "
+          f"tracked_edges={len(edge_counters)}")
+
     if not session_id or lat is None or lng is None:
+        print(f"[TELEMETRY] ERROR: Missing required fields "
+              f"(session_id={session_id!r}, lat={lat}, lng={lng})")
         return jsonify({"error": "session_id, lat, and lng are required."}), 400
 
     session = active_sessions.get(session_id)
     if not session:
+        # This means /api/start_trip was never called for this session,
+        # or the session was already evicted (deviation / stale cleanup).
+        print(f"[TELEMETRY] WARNING: No active session for id={session_id!r}. "
+              f"Known sessions: {list(active_sessions.keys())}")
         return jsonify({"status": "no_session"}), 404
 
     # Update last seen
@@ -819,6 +831,7 @@ def telemetry():
     # Check proximity to any assigned edge (within 500 m of either endpoint)
     DEVIATION_THRESHOLD_M = 500
     on_route = False
+    closest_dist_m = float("inf")
 
     for edge in session["assigned_edges"]:
         u_id, v_id = edge
@@ -836,11 +849,18 @@ def telemetry():
         mid_lat, mid_lng = (u_lat + v_lat) / 2, (u_lng + v_lng) / 2
         dist_mid = _haversine(lat, lng, mid_lat, mid_lng)
 
-        if min(dist_u, dist_v, dist_mid) <= DEVIATION_THRESHOLD_M:
+        edge_min = min(dist_u, dist_v, dist_mid)
+        closest_dist_m = min(closest_dist_m, edge_min)
+
+        if edge_min <= DEVIATION_THRESHOLD_M:
             on_route = True
             break
 
     if on_route:
+        print(f"[TELEMETRY] ON_TRACK: session={session_id!r}, "
+              f"pos=({lat:.4f},{lng:.4f}), closest_edge_dist={closest_dist_m:.0f}m, "
+              f"active_sessions={len(active_sessions)}, "
+              f"edge_counters={sum(edge_counters.values())}")
         return jsonify({"status": "on_track"})
 
     # ── Deviated: decrement counters and remove session ──────────
@@ -852,8 +872,10 @@ def telemetry():
 
     active_sessions.pop(session_id, None)
 
-    print(f"[FLEET] Deviation detected: session={session_id}, "
-          f"pos=({lat:.4f},{lng:.4f}), edges released")
+    print(f"[TELEMETRY] DEVIATED: session={session_id!r}, "
+          f"pos=({lat:.4f},{lng:.4f}), closest_edge_dist={closest_dist_m:.0f}m, "
+          f"edges_released={len(session['assigned_edges'])}, "
+          f"remaining_active_sessions={len(active_sessions)}")
 
     return jsonify({"status": "deviated"})
 
@@ -880,10 +902,22 @@ def fleet_status():
         active_sessions.pop(sid, None)
         print(f"[FLEET] Stale session cleaned: {sid}")
 
+    active_count = len(active_sessions)
+    edge_total   = sum(edge_counters.values())
+
+    print(f"[FLEET_STATUS] active_sessions={active_count}, "
+          f"tracked_edges={len(edge_counters)}, "
+          f"total_vehicle_edge_slots={edge_total}, "
+          f"stale_cleaned={len(stale_ids)}")
+
     return jsonify({
-        "active_sessions": len(active_sessions),
+        # Primary keys (used internally)
+        "active_sessions": active_count,
         "tracked_edges": len(edge_counters),
-        "total_vehicle_edge_slots": sum(edge_counters.values()),
+        "total_vehicle_edge_slots": edge_total,
+        # Alias keys — match what the frontend / monitoring dashboards expect
+        "active_vehicles": active_count,
+        "edge_counters": edge_total,
         "sessions": {
             sid: {
                 "edges": len(sdata.get("assigned_edges", [])),
