@@ -55,6 +55,9 @@ html, body {
     background: var(--bg);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Flexbox column ensures map fills remaining viewport */
+    display: flex;
+    flex-direction: column;
 }
 
 /* ── Map ─────────────────────────────────────────────────────────── */
@@ -63,6 +66,8 @@ html, body {
     position: fixed;
     inset: 0;
     z-index: 1;
+    /* Guarantee minimum height on mobile via vh fallback */
+    min-height: 60vh;
 }
 
 .leaflet-container {
@@ -410,6 +415,7 @@ select.input-field {
 .btn-route {
     width: 100%;
     padding: 12px;
+    min-height: 48px;  /* Mobile touch target — Google Material Design spec */
     border: none;
     border-radius: var(--radius-sm);
     background: var(--accent);
@@ -424,6 +430,8 @@ select.input-field {
     align-items: center;
     justify-content: center;
     gap: 8px;
+    /* Prevent double-tap zoom on mobile */
+    touch-action: manipulation;
 }
 
 .btn-route:hover {
@@ -634,6 +642,7 @@ select.input-field {
     justify-content: center;
     gap: 6px;
     padding: 10px 10px;
+    min-height: 48px;  /* Mobile touch target */
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--surface-raised);
@@ -644,6 +653,7 @@ select.input-field {
     cursor: pointer;
     transition: all var(--transition);
     white-space: nowrap;
+    touch-action: manipulation;
 }
 
 .btn-nav:hover {
@@ -773,18 +783,42 @@ select.input-field {
 
 @media (max-width: 480px) {
     .control-card {
-        width: calc(100vw - 24px);
-        left: 12px;
-        top: 12px;
-        max-height: 60vh;
-        padding: 16px;
+        width: calc(100vw - 16px);
+        left: 8px;
+        top: 8px;
+        max-height: 55vh;
+        padding: 14px;
+        border-radius: var(--radius-sm);
     }
 
     .metrics-grid { gap: 6px; }
     .metric-card { padding: 10px 6px; }
     .metric-value { font-size: 1rem; }
-    .mode-btn { font-size: 0.72rem; padding: 7px 6px; }
+    .mode-btn { font-size: 0.72rem; padding: 7px 6px; min-height: 44px; }
     .congestion-legend { flex-wrap: wrap; gap: 10px; }
     .logo-icon { display: none; }
     .subtitle { padding-left: 0; }
+
+    /* Larger touch targets on small screens */
+    .input-field { min-height: 48px; font-size: 16px; /* prevents iOS zoom on focus */ }
+    .btn-route { min-height: 52px; font-size: 1rem; }
+    .btn-nav { min-height: 52px; }
+    .toggle-btn { min-width: 40px; min-height: 40px; }
+
+    /* Zoom controls bigger for thumb access */
+    .leaflet-control-zoom a {
+        width: 40px !important;
+        height: 40px !important;
+        line-height: 40px !important;
+        font-size: 20px !important;
+    }
+}
+
+/* Landscape phones — push panel to side, give map full height */
+@media (max-width: 480px) and (orientation: landscape) {
+    .control-card {
+        max-height: 90vh;
+        top: 4px;
+        width: 280px;
+    }
 }

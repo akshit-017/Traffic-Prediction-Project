@@ -14,6 +14,7 @@ import json
 import math
 import os
 import random
+import threading
 import time as _time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -80,6 +81,9 @@ app = Flask(__name__)
 edge_counters = {}   # {(node_u, node_v): int}
 # Tracks per-session data: assigned edges & last telemetry timestamp
 active_sessions = {} # {session_id: {'assigned_edges': [(u,v), ...], 'last_seen': float}}
+# Thread lock: Flask on Render uses threads — this prevents concurrent
+# requests from corrupting edge_counters / active_sessions.
+_fleet_lock = threading.Lock()
 
 # ── Load Graph ───────────────────────────────────────────────────────
 GRAPH = load_graph()
@@ -764,52 +768,53 @@ def start_trip():
     if not session_id or len(path) < 2:
         return jsonify({"error": "session_id and a path with ≥2 nodes are required."}), 400
 
-    print(f"[START_TRIP] Called: session={session_id!r}, path_nodes={len(path)}, "
-          f"currently_active_sessions={len(active_sessions)}, "
-          f"current_edge_total={sum(edge_counters.values())}")
+    with _fleet_lock:
+        print(f"[START_TRIP] Called: session={session_id!r}, path_nodes={len(path)}, "
+              f"currently_active_sessions={len(active_sessions)}, "
+              f"current_edge_total={sum(edge_counters.values())}")
 
-    # ── Release this session's OLD edges before re-registering ────
-    # This handles the case where the same session_id re-routes mid-trip.
-    # IMPORTANT: we only decrement edges belonging to THIS session —
-    # other sessions' counters are completely untouched.
-    released_count = 0
-    if session_id in active_sessions:
-        old_edges = active_sessions[session_id].get("assigned_edges", [])
-        print(f"[START_TRIP] Re-registering existing session={session_id!r}: "
-              f"releasing {len(old_edges)} old edges first")
-        for edge in old_edges:
-            key = tuple(edge)
-            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-            if edge_counters[key] == 0:
-                edge_counters.pop(key, None)
-            released_count += 1
+        # ── Release this session's OLD edges before re-registering ────
+        # This handles the case where the same session_id re-routes mid-trip.
+        # IMPORTANT: we only decrement edges belonging to THIS session —
+        # other sessions' counters are completely untouched.
+        released_count = 0
+        if session_id in active_sessions:
+            old_edges = active_sessions[session_id].get("assigned_edges", [])
+            print(f"[START_TRIP] Re-registering existing session={session_id!r}: "
+                  f"releasing {len(old_edges)} old edges first")
+            for edge in old_edges:
+                key = tuple(edge)
+                edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+                if edge_counters[key] == 0:
+                    edge_counters.pop(key, None)
+                released_count += 1
 
-    # ── Register new edges and increment counters ─────────────────
-    edges = []
-    for i in range(len(path) - 1):
-        edge = (path[i], path[i + 1])
-        edges.append(edge)
-        edge_counters[edge] = edge_counters.get(edge, 0) + 1
+        # ── Register new edges and increment counters ─────────────────
+        edges = []
+        for i in range(len(path) - 1):
+            edge = (path[i], path[i + 1])
+            edges.append(edge)
+            edge_counters[edge] = edge_counters.get(edge, 0) + 1
 
-    active_sessions[session_id] = {
-        "assigned_edges": edges,
-        "last_seen": _time.time(),
-        "source": path[0],
-        "destination": path[-1],
-        "registered_at": _time.time(),
-    }
+        active_sessions[session_id] = {
+            "assigned_edges": edges,
+            "last_seen": _time.time(),
+            "source": path[0],
+            "destination": path[-1],
+            "registered_at": _time.time(),
+        }
 
-    print(f"[START_TRIP] Registered: session={session_id!r}, "
-          f"new_edges={len(edges)}, released_old_edges={released_count}, "
-          f"total_active_sessions={len(active_sessions)}, "
-          f"total_edge_slots={sum(edge_counters.values())}")
+        print(f"[START_TRIP] Registered: session={session_id!r}, "
+              f"new_edges={len(edges)}, released_old_edges={released_count}, "
+              f"total_active_sessions={len(active_sessions)}, "
+              f"total_edge_slots={sum(edge_counters.values())}")
 
-    return jsonify({
-        "status": "registered",
-        "session_id": session_id,
-        "edges_tracked": len(edges),
-        "total_active_sessions": len(active_sessions),
-    })
+        return jsonify({
+            "status": "registered",
+            "session_id": session_id,
+            "edges_tracked": len(edges),
+            "total_active_sessions": len(active_sessions),
+        })
 
 
 @app.route("/api/end_trip", methods=["POST"])
@@ -836,34 +841,35 @@ def end_trip():
     if not session_id:
         return jsonify({"error": "session_id is required."}), 400
 
-    session = active_sessions.get(session_id)
-    if not session:
-        print(f"[END_TRIP] Session {session_id!r} not found (already gone or never started). "
-              f"reason={reason!r}")
-        return jsonify({"status": "already_gone", "session_id": session_id})
+    with _fleet_lock:
+        session = active_sessions.get(session_id)
+        if not session:
+            print(f"[END_TRIP] Session {session_id!r} not found (already gone or never started). "
+                  f"reason={reason!r}")
+            return jsonify({"status": "already_gone", "session_id": session_id})
 
-    # Release only this session's edges
-    edges = session.get("assigned_edges", [])
-    for edge in edges:
-        key = tuple(edge)
-        edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-        if edge_counters[key] == 0:
-            edge_counters.pop(key, None)
+        # Release only this session's edges
+        edges = session.get("assigned_edges", [])
+        for edge in edges:
+            key = tuple(edge)
+            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+            if edge_counters[key] == 0:
+                edge_counters.pop(key, None)
 
-    active_sessions.pop(session_id, None)
+        active_sessions.pop(session_id, None)
 
-    print(f"[END_TRIP] Released: session={session_id!r}, reason={reason!r}, "
-          f"edges_released={len(edges)}, "
-          f"remaining_active_sessions={len(active_sessions)}, "
-          f"remaining_edge_slots={sum(edge_counters.values())}")
+        print(f"[END_TRIP] Released: session={session_id!r}, reason={reason!r}, "
+              f"edges_released={len(edges)}, "
+              f"remaining_active_sessions={len(active_sessions)}, "
+              f"remaining_edge_slots={sum(edge_counters.values())}")
 
-    return jsonify({
-        "status": "released",
-        "session_id": session_id,
-        "edges_released": len(edges),
-        "reason": reason,
-        "remaining_active_sessions": len(active_sessions),
-    })
+        return jsonify({
+            "status": "released",
+            "session_id": session_id,
+            "edges_released": len(edges),
+            "reason": reason,
+            "remaining_active_sessions": len(active_sessions),
+        })
 
 
 @app.route("/api/telemetry", methods=["POST"])
@@ -894,67 +900,70 @@ def telemetry():
               f"(session_id={session_id!r}, lat={lat}, lng={lng})")
         return jsonify({"error": "session_id, lat, and lng are required."}), 400
 
-    session = active_sessions.get(session_id)
-    if not session:
-        # This means /api/start_trip was never called for this session,
-        # or the session was already evicted (deviation / stale cleanup).
-        print(f"[TELEMETRY] WARNING: No active session for id={session_id!r}. "
-              f"Known sessions: {list(active_sessions.keys())}")
-        return jsonify({"status": "no_session"}), 404
+    with _fleet_lock:
+        session = active_sessions.get(session_id)
+        if not session:
+            # This means /api/start_trip was never called for this session,
+            # or the session was already evicted (deviation / stale cleanup).
+            print(f"[TELEMETRY] WARNING: No active session for id={session_id!r}. "
+                  f"Known sessions: {list(active_sessions.keys())}")
+            return jsonify({"status": "no_session"}), 404
 
-    # Update last seen
-    session["last_seen"] = _time.time()
+        # Update last seen
+        session["last_seen"] = _time.time()
 
-    # Check proximity to any assigned edge (within 500 m of either endpoint)
-    DEVIATION_THRESHOLD_M = 500
-    on_route = False
-    closest_dist_m = float("inf")
+        # Check proximity to any assigned edge (within 100 m)
+        # 100m is appropriate for real GPS hardware (accurate to ~5-15m).
+        # The old 500m was for simulation; real-world needs tighter tolerance.
+        DEVIATION_THRESHOLD_M = 100
+        on_route = False
+        closest_dist_m = float("inf")
 
-    for edge in session["assigned_edges"]:
-        u_id, v_id = edge
-        u_node = GRAPH.nodes.get(u_id, {})
-        v_node = GRAPH.nodes.get(v_id, {})
+        for edge in session["assigned_edges"]:
+            u_id, v_id = edge
+            u_node = GRAPH.nodes.get(u_id, {})
+            v_node = GRAPH.nodes.get(v_id, {})
 
-        u_lat, u_lng = u_node.get("lat", 0), u_node.get("lng", 0)
-        v_lat, v_lng = v_node.get("lat", 0), v_node.get("lng", 0)
+            u_lat, u_lng = u_node.get("lat", 0), u_node.get("lng", 0)
+            v_lat, v_lng = v_node.get("lat", 0), v_node.get("lng", 0)
 
-        # Check distance to either endpoint of the edge
-        dist_u = _haversine(lat, lng, u_lat, u_lng)
-        dist_v = _haversine(lat, lng, v_lat, v_lng)
+            # Check distance to either endpoint of the edge
+            dist_u = _haversine(lat, lng, u_lat, u_lng)
+            dist_v = _haversine(lat, lng, v_lat, v_lng)
 
-        # Also check distance to the midpoint
-        mid_lat, mid_lng = (u_lat + v_lat) / 2, (u_lng + v_lng) / 2
-        dist_mid = _haversine(lat, lng, mid_lat, mid_lng)
+            # Also check distance to the midpoint
+            mid_lat, mid_lng = (u_lat + v_lat) / 2, (u_lng + v_lng) / 2
+            dist_mid = _haversine(lat, lng, mid_lat, mid_lng)
 
-        edge_min = min(dist_u, dist_v, dist_mid)
-        closest_dist_m = min(closest_dist_m, edge_min)
+            edge_min = min(dist_u, dist_v, dist_mid)
+            closest_dist_m = min(closest_dist_m, edge_min)
 
-        if edge_min <= DEVIATION_THRESHOLD_M:
-            on_route = True
-            break
+            if edge_min <= DEVIATION_THRESHOLD_M:
+                on_route = True
+                break
 
-    if on_route:
-        print(f"[TELEMETRY] ON_TRACK: session={session_id!r}, "
+        if on_route:
+            print(f"[TELEMETRY] ON_TRACK: session={session_id!r}, "
+                  f"pos=({lat:.4f},{lng:.4f}), closest_edge_dist={closest_dist_m:.0f}m, "
+                  f"active_sessions={len(active_sessions)}, "
+                  f"edge_counters={sum(edge_counters.values())}")
+            return jsonify({"status": "on_track"})
+
+        # ── Deviated: decrement counters and remove session ──────────
+        for edge in session["assigned_edges"]:
+            key = tuple(edge)
+            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+            if edge_counters[key] == 0:
+                edge_counters.pop(key, None)
+
+        active_sessions.pop(session_id, None)
+
+        print(f"[TELEMETRY] DEVIATED: session={session_id!r}, "
               f"pos=({lat:.4f},{lng:.4f}), closest_edge_dist={closest_dist_m:.0f}m, "
-              f"active_sessions={len(active_sessions)}, "
-              f"edge_counters={sum(edge_counters.values())}")
-        return jsonify({"status": "on_track"})
+              f"edges_released={len(session['assigned_edges'])}, "
+              f"remaining_active_sessions={len(active_sessions)}")
 
-    # ── Deviated: decrement counters and remove session ──────────
-    for edge in session["assigned_edges"]:
-        key = tuple(edge)
-        edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-        if edge_counters[key] == 0:
-            edge_counters.pop(key, None)
-
-    active_sessions.pop(session_id, None)
-
-    print(f"[TELEMETRY] DEVIATED: session={session_id!r}, "
-          f"pos=({lat:.4f},{lng:.4f}), closest_edge_dist={closest_dist_m:.0f}m, "
-          f"edges_released={len(session['assigned_edges'])}, "
-          f"remaining_active_sessions={len(active_sessions)}")
-
-    return jsonify({"status": "deviated"})
+        return jsonify({"status": "deviated"})
 
 
 @app.route("/api/fleet_status", methods=["GET"])
@@ -963,51 +972,52 @@ def fleet_status():
     Debug endpoint: return current fleet state.
     Shows active sessions, edge load counters, and total tracked vehicles.
     """
-    # Clean up stale sessions (idle > 10 minutes)
-    STALE_THRESHOLD = 600  # seconds
-    now = _time.time()
-    stale_ids = [
-        sid for sid, sdata in active_sessions.items()
-        if now - sdata.get("last_seen", 0) > STALE_THRESHOLD
-    ]
-    for sid in stale_ids:
-        for edge in active_sessions[sid].get("assigned_edges", []):
-            key = tuple(edge)
-            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-            if edge_counters[key] == 0:
-                edge_counters.pop(key, None)
-        active_sessions.pop(sid, None)
-        print(f"[FLEET] Stale session cleaned: {sid}")
+    with _fleet_lock:
+        # Clean up stale sessions (idle > 10 minutes)
+        STALE_THRESHOLD = 600  # seconds
+        now = _time.time()
+        stale_ids = [
+            sid for sid, sdata in active_sessions.items()
+            if now - sdata.get("last_seen", 0) > STALE_THRESHOLD
+        ]
+        for sid in stale_ids:
+            for edge in active_sessions[sid].get("assigned_edges", []):
+                key = tuple(edge)
+                edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+                if edge_counters[key] == 0:
+                    edge_counters.pop(key, None)
+            active_sessions.pop(sid, None)
+            print(f"[FLEET] Stale session cleaned: {sid}")
 
-    active_count = len(active_sessions)
-    edge_total   = sum(edge_counters.values())
+        active_count = len(active_sessions)
+        edge_total   = sum(edge_counters.values())
 
-    print(f"[FLEET_STATUS] active_sessions={active_count}, "
-          f"tracked_edges={len(edge_counters)}, "
-          f"total_vehicle_edge_slots={edge_total}, "
-          f"stale_cleaned={len(stale_ids)}")
+        print(f"[FLEET_STATUS] active_sessions={active_count}, "
+              f"tracked_edges={len(edge_counters)}, "
+              f"total_vehicle_edge_slots={edge_total}, "
+              f"stale_cleaned={len(stale_ids)}")
 
-    return jsonify({
-        # Primary keys (used internally)
-        "active_sessions": active_count,
-        "tracked_edges": len(edge_counters),
-        "total_vehicle_edge_slots": edge_total,
-        # Alias keys — match what the frontend / monitoring dashboards expect
-        "active_vehicles": active_count,
-        "edge_counters": edge_total,
-        "sessions": {
-            sid: {
-                "edges": len(sdata.get("assigned_edges", [])),
-                "idle_seconds": round(now - sdata.get("last_seen", now)),
-            }
-            for sid, sdata in active_sessions.items()
-        },
-        "edge_loads": {
-            f"{u}->{v}": count
-            for (u, v), count in edge_counters.items()
-        },
-        "stale_cleaned": len(stale_ids),
-    })
+        return jsonify({
+            # Primary keys (used internally)
+            "active_sessions": active_count,
+            "tracked_edges": len(edge_counters),
+            "total_vehicle_edge_slots": edge_total,
+            # Alias keys — match what the frontend / monitoring dashboards expect
+            "active_vehicles": active_count,
+            "edge_counters": edge_total,
+            "sessions": {
+                sid: {
+                    "edges": len(sdata.get("assigned_edges", [])),
+                    "idle_seconds": round(now - sdata.get("last_seen", now)),
+                }
+                for sid, sdata in active_sessions.items()
+            },
+            "edge_loads": {
+                f"{u}->{v}": count
+                for (u, v), count in edge_counters.items()
+            },
+            "stale_cleaned": len(stale_ids),
+        })
 
 
 if __name__ == "__main__":

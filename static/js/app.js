@@ -10,8 +10,15 @@
 // This prevents trip-2 from touching trip-1's edge counters on /api/start_trip.
 let SESSION_ID = _generateSessionId();
 function _generateSessionId() {
-    return 'ses-' + Math.random().toString(36).substring(2, 10) +
-           '-' + Date.now().toString(36);
+    // crypto.randomUUID() is cryptographically unique — zero collision
+    // risk across concurrent users.  Fallback covers older browsers.
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return 'ses-' + crypto.randomUUID();
+    }
+    // Fallback: combine high-res timestamp + random segment
+    return 'ses-' + Date.now().toString(36) + '-' +
+           Math.random().toString(36).substring(2, 10) + '-' +
+           Math.random().toString(36).substring(2, 6);
 }
 console.log('[FLEET] Initial Session ID:', SESSION_ID);
 
@@ -55,11 +62,14 @@ let currentMode = "live";
 let lastRoutePath = null;       // Array of node IDs from last computed route
 let lastRouteData = null;       // Full response data from /api/predict_route
 let routePolylineCoords = [];   // Flattened array of [lat, lng] along the polyline
-let carMarker = null;           // Leaflet marker for the simulated car
-let telemetryInterval = null;   // setInterval ID for telemetry loop
-let carStepIndex = 0;           // Current position along routePolylineCoords
+let carMarker = null;           // Leaflet marker for the live GPS dot
+let telemetryInterval = null;   // setInterval ID for SIMULATION-ONLY fallback
+let geoWatchId = null;          // navigator.geolocation.watchPosition() ID
+let wakeLockSentinel = null;    // Screen Wake Lock sentinel
+let carStepIndex = 0;           // Current position along routePolylineCoords (sim only)
 let isNavigating = false;       // Whether navigation is active
 let simulateDeviation = false;  // Flag to trigger wrong-turn on next tick
+let destinationCoords = null;   // [lat, lng] of the route destination for proximity check
 
 // ── DOM Elements ────────────────────────────────────────────────
 const sourceSelect     = document.getElementById("source");
@@ -482,6 +492,7 @@ btnRoute.addEventListener("click", async () => {
     } catch (err) {
         console.error("Route error:", err);
         showError("Failed to connect to the server.");
+        alert("Route calculation failed. Please try different points.");
     } finally {
         btnRoute.innerHTML = `
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -787,23 +798,38 @@ function resetNavUI() {
 
 /**
  * Stop an active navigation session.
- * Notifies the backend via /api/end_trip so edge_counters are released
- * immediately — without waiting for the stale-session cleanup timeout.
+ * Releases Wake Lock, clears GPS watch, and notifies backend.
  *
  * @param {string} reason - 'cancelled' | 'rerouted' | 'completed'
  */
 function stopNavigation(reason = 'cancelled') {
+    // 1. Stop GPS tracking
+    if (geoWatchId !== null) {
+        navigator.geolocation.clearWatch(geoWatchId);
+        geoWatchId = null;
+        console.log('[FLEET] GPS watch cleared.');
+    }
+    // Fallback simulation interval
     if (telemetryInterval) {
         clearInterval(telemetryInterval);
         telemetryInterval = null;
     }
+
+    // 2. Release Wake Lock
+    if (wakeLockSentinel) {
+        wakeLockSentinel.release().then(() => {
+            console.log('[FLEET] Wake Lock released.');
+        }).catch(e => console.warn('[FLEET] Wake Lock release error:', e));
+        wakeLockSentinel = null;
+    }
+
+    // 3. Remove car marker
     if (carMarker) {
         map.removeLayer(carMarker);
         carMarker = null;
     }
 
-    // Tell the backend to release this session's edge slots.
-    // Fire-and-forget: we don't block the UI on this response.
+    // 4. Tell the backend to release this session's edge slots.
     if (isNavigating || reason === 'rerouted') {
         const sid = SESSION_ID;
         fetch('/api/end_trip', {
@@ -820,7 +846,29 @@ function stopNavigation(reason = 'cancelled') {
 }
 
 /**
- * Start the navigation simulation.
+ * Acquire the Screen Wake Lock so the phone stays awake while driving.
+ */
+async function acquireWakeLock() {
+    if ('wakeLock' in navigator) {
+        try {
+            wakeLockSentinel = await navigator.wakeLock.request('screen');
+            console.log('[FLEET] Wake Lock acquired — screen will stay on.');
+            // Re-acquire if visibility changes (e.g., user switches tabs then returns)
+            wakeLockSentinel.addEventListener('release', () => {
+                console.log('[FLEET] Wake Lock released by system.');
+            });
+        } catch (err) {
+            console.warn('[FLEET] Wake Lock request failed:', err.message);
+        }
+    } else {
+        console.warn('[FLEET] Wake Lock API not supported on this browser.');
+    }
+}
+
+/**
+ * Start live GPS navigation.
+ * Uses navigator.geolocation.watchPosition() for real hardware GPS.
+ * Falls back to simulation if geolocation is unavailable.
  */
 async function startNavigation() {
     if (!lastRoutePath || lastRoutePath.length < 2) {
@@ -828,17 +876,19 @@ async function startNavigation() {
         return;
     }
     if (routePolylineCoords.length < 2) {
-        console.warn("[FLEET] No polyline coordinates for animation.");
+        console.warn("[FLEET] No polyline coordinates for navigation.");
         return;
     }
 
     // 1. Assign a fresh session ID for this new navigation trip.
-    // Each trip gets its own unique ID so concurrent trips are independent
-    // and re-routing never touches another session's edge_counters.
     SESSION_ID = _generateSessionId();
     console.log('[FLEET] New trip session ID:', SESSION_ID);
 
-    // 2. Register the trip on the backend
+    // 2. Store destination coordinates for proximity-based stop condition
+    destinationCoords = routePolylineCoords[routePolylineCoords.length - 1];
+    console.log(`[FLEET] Destination coords: [${destinationCoords[0].toFixed(4)}, ${destinationCoords[1].toFixed(4)}]`);
+
+    // 3. Register the trip on the backend
     try {
         const tripRes = await fetch("/api/start_trip", {
             method: "POST",
@@ -852,14 +902,16 @@ async function startNavigation() {
         console.log("[FLEET] Trip registered:", tripData);
     } catch (err) {
         console.error("[FLEET] Failed to register trip:", err);
+        alert("Could not register your trip. Please check your connection.");
         return;
     }
 
-    // 2. Place the car marker at the start of the route
+    // 4. Set navigation state
     isNavigating = true;
     carStepIndex = 0;
     simulateDeviation = false;
 
+    // 5. Place the car marker at the start of the route
     const startPos = routePolylineCoords[0];
     const carIcon = L.divIcon({
         className: "car-marker-icon",
@@ -868,7 +920,7 @@ async function startNavigation() {
     });
     carMarker = L.marker(startPos, { icon: carIcon, zIndex: 9999 }).addTo(map);
 
-    // Update UI
+    // 6. Update UI
     btnStartNav.innerHTML = `
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
@@ -879,45 +931,242 @@ async function startNavigation() {
     telemetryStatus.classList.remove("hidden");
     telemetryStatus.classList.remove("deviated");
     telemetryStatus.classList.add("on-track");
-    telemetryText.textContent = "Telemetry active \u00b7 On track";
+    telemetryText.textContent = "Acquiring GPS signal\u2026";
 
-    // 3. Start the telemetry polling loop (every 2 seconds)
-    telemetryInterval = setInterval(() => telemetryTick(), 2000);
+    // 7. Acquire Wake Lock to keep screen on while driving
+    await acquireWakeLock();
+
+    // 8. Start GPS tracking — real hardware or simulation fallback
+    if ('geolocation' in navigator) {
+        console.log('[FLEET] Starting hardware GPS tracking via watchPosition().');
+        geoWatchId = navigator.geolocation.watchPosition(
+            onGPSPosition,
+            onGPSError,
+            {
+                enableHighAccuracy: true, // Force physical GPS chip
+                maximumAge: 0,            // No cached positions
+                timeout: 10000,           // 10s timeout per fix
+            }
+        );
+    } else {
+        // Fallback: simulation for desktop testing
+        console.warn('[FLEET] Geolocation unavailable — falling back to simulation.');
+        telemetryText.textContent = "Telemetry active \u00b7 Simulated";
+        telemetryInterval = setInterval(() => simulationTick(), 2000);
+    }
 }
 
 /**
- * A single tick of the telemetry loop.
- * Moves the car, sends position to backend, updates UI.
+ * Called by watchPosition() on every GPS fix from the phone hardware.
+ * Sends position to backend, checks destination proximity, handles deviation.
  */
-async function telemetryTick() {
+async function onGPSPosition(position) {
+    if (!isNavigating || !carMarker) return;
+
+    let currentPos = [position.coords.latitude, position.coords.longitude];
+    const accuracy = position.coords.accuracy; // meters
+
+    // If the user pressed "Simulate Wrong Turn", offset the real position
+    if (simulateDeviation) {
+        currentPos = [currentPos[0] + 0.009, currentPos[1] + 0.009];
+        simulateDeviation = false;
+        const el = carMarker.getElement();
+        if (el) el.classList.add("deviated");
+    } else {
+        const el = carMarker.getElement();
+        if (el) el.classList.remove("deviated");
+    }
+
+    // Move the marker to the live GPS position
+    carMarker.setLatLng(currentPos);
+    map.panTo(currentPos, { animate: true, duration: 0.5 });
+
+    // ── Stop Condition 1: Destination Reached (< 50 meters) ─────────
+    if (destinationCoords) {
+        const distToDest = haversineDist(currentPos, destinationCoords) * 1000; // km → m
+        if (distToDest < 50) {
+            console.log(`[FLEET] Destination reached! Distance: ${distToDest.toFixed(0)}m`);
+            telemetryText.textContent = "\u2713 Arrived at destination";
+            telemetryStatus.classList.remove("deviated");
+            telemetryStatus.classList.add("on-track");
+
+            // Clean up GPS + wake lock + backend
+            if (geoWatchId !== null) {
+                navigator.geolocation.clearWatch(geoWatchId);
+                geoWatchId = null;
+            }
+            if (wakeLockSentinel) {
+                wakeLockSentinel.release().catch(() => {});
+                wakeLockSentinel = null;
+            }
+
+            const sid = SESSION_ID;
+            fetch('/api/end_trip', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sid, reason: 'completed' }),
+            })
+            .then(r => r.json())
+            .then(d => console.log('[FLEET] end_trip (completed):', d))
+            .catch(e => console.warn('[FLEET] end_trip failed on completion:', e));
+
+            btnWrongTurn.classList.add("hidden");
+            btnStartNav.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                Start Navigation`;
+            btnStartNav.classList.remove("navigating");
+            isNavigating = false;
+            return;
+        }
+    }
+
+    // ── Send telemetry to backend ───────────────────────────────────
+    try {
+        const res = await fetch("/api/telemetry", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                session_id: SESSION_ID,
+                lat: currentPos[0],
+                lng: currentPos[1],
+            }),
+        });
+
+        if (!res.ok) {
+            console.warn(`[FLEET] Telemetry HTTP ${res.status} for session=${SESSION_ID}.`);
+        }
+
+        const data = await res.json();
+        console.log(`[FLEET] Telemetry: status=${data.status} | GPS accuracy=${accuracy?.toFixed(0)}m`);
+
+        // Update telemetry status UI
+        if (data.status === "on_track") {
+            telemetryStatus.classList.remove("deviated");
+            telemetryStatus.classList.add("on-track");
+            const distToDest = destinationCoords
+                ? (haversineDist(currentPos, destinationCoords) * 1000).toFixed(0)
+                : '?';
+            telemetryText.textContent = `GPS active \u00b7 On track \u00b7 ${distToDest}m to dest`;
+
+        } else if (data.status === "deviated") {
+            // ── Stop Condition 2: Backend says deviated ─────────────────
+            telemetryStatus.classList.remove("on-track");
+            telemetryStatus.classList.add("deviated");
+            telemetryText.textContent = "\u26a0 Deviation detected! Vehicle off-route";
+
+            // Stop tracking immediately
+            if (geoWatchId !== null) {
+                navigator.geolocation.clearWatch(geoWatchId);
+                geoWatchId = null;
+            }
+            if (wakeLockSentinel) {
+                wakeLockSentinel.release().catch(() => {});
+                wakeLockSentinel = null;
+            }
+
+            btnWrongTurn.classList.add("hidden");
+            btnStartNav.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                Start Navigation`;
+            btnStartNav.classList.remove("navigating");
+            isNavigating = false;
+
+            // Alert the user and offer recalculation
+            alert("You left the route. Recalculate?");
+
+        } else if (data.status === "no_session") {
+            console.error("[FLEET] Server has no session for", SESSION_ID,
+                          "\u2014 re-registering trip...");
+            if (lastRoutePath && lastRoutePath.length >= 2) {
+                fetch("/api/start_trip", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ session_id: SESSION_ID, path: lastRoutePath }),
+                }).then(r => r.json()).then(d => {
+                    console.log("[FLEET] Auto re-register result:", d);
+                }).catch(e => console.error("[FLEET] Re-register failed:", e));
+            }
+        }
+    } catch (err) {
+        console.error("[FLEET] Telemetry ping failed:", err);
+    }
+}
+
+/**
+ * Called by watchPosition() on GPS error.
+ */
+function onGPSError(error) {
+    console.warn(`[FLEET] GPS error (code=${error.code}): ${error.message}`);
+    if (error.code === error.TIMEOUT) {
+        telemetryText.textContent = "GPS signal lost \u2014 retrying\u2026";
+    } else if (error.code === error.PERMISSION_DENIED) {
+        alert("Location permission denied. Navigation requires GPS access.");
+        stopNavigation('cancelled');
+    }
+    // POSITION_UNAVAILABLE: watchPosition will automatically retry
+}
+
+/**
+ * Simulation-only fallback tick for desktop testing (no real GPS).
+ * Walks along the precomputed polyline and sends telemetry.
+ */
+async function simulationTick() {
     if (!isNavigating || !carMarker) return;
 
     let currentPos;
 
     if (simulateDeviation) {
-        // Move the car 1 km away from the route (perpendicular offset)
         const basePos = routePolylineCoords[Math.min(carStepIndex, routePolylineCoords.length - 1)];
-        // Offset ~0.009 degrees ≈ ~1 km at Bengaluru's latitude
         currentPos = [basePos[0] + 0.009, basePos[1] + 0.009];
-        simulateDeviation = false; // One-shot: only deviate for this tick
-
-        // Visual feedback on the car marker
+        simulateDeviation = false;
         const el = carMarker.getElement();
         if (el) el.classList.add("deviated");
     } else {
-        // Advance along the route polyline
-        // Move 3-5 points per tick for a smooth simulation
         const stepsPerTick = Math.max(1, Math.floor(routePolylineCoords.length / 30));
         carStepIndex = Math.min(carStepIndex + stepsPerTick, routePolylineCoords.length - 1);
         currentPos = routePolylineCoords[carStepIndex];
-
-        // Reset deviated visual if back on track
         const el = carMarker.getElement();
         if (el) el.classList.remove("deviated");
     }
 
-    // Move the marker
     carMarker.setLatLng(currentPos);
+
+    // Check destination proximity in simulation too
+    if (destinationCoords) {
+        const distToDest = haversineDist(currentPos, destinationCoords) * 1000;
+        if (distToDest < 50) {
+            console.log(`[FLEET] Simulation: Destination reached! ${distToDest.toFixed(0)}m`);
+            telemetryText.textContent = "\u2713 Arrived at destination";
+            telemetryStatus.classList.remove("deviated");
+            telemetryStatus.classList.add("on-track");
+            clearInterval(telemetryInterval);
+            telemetryInterval = null;
+
+            const sid = SESSION_ID;
+            fetch('/api/end_trip', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sid, reason: 'completed' }),
+            })
+            .then(r => r.json())
+            .then(d => console.log('[FLEET] end_trip (completed):', d))
+            .catch(e => console.warn('[FLEET] end_trip failed on completion:', e));
+
+            btnWrongTurn.classList.add("hidden");
+            btnStartNav.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                Start Navigation`;
+            btnStartNav.classList.remove("navigating");
+            isNavigating = false;
+            return;
+        }
+    }
 
     // Send telemetry to backend
     try {
@@ -931,18 +1180,13 @@ async function telemetryTick() {
             }),
         });
 
-        // Log the raw HTTP status so 404 (no_session) surfaces in DevTools
         if (!res.ok) {
-            console.warn(`[FLEET] Telemetry HTTP ${res.status} for session=${SESSION_ID}. ` +
-                         `This usually means /api/start_trip wasn't called yet, ` +
-                         `or the session was evicted after a deviation.`);
+            console.warn(`[FLEET] Telemetry HTTP ${res.status} for session=${SESSION_ID}.`);
         }
 
         const data = await res.json();
-        console.log(`[FLEET] Telemetry response: HTTP ${res.status} | status=${data.status} | ` +
-                    `pos: [${currentPos[0].toFixed(4)}, ${currentPos[1].toFixed(4)}]`);
+        console.log(`[FLEET] Sim telemetry: status=${data.status} | step ${carStepIndex}/${routePolylineCoords.length - 1}`);
 
-        // Update telemetry status UI
         if (data.status === "on_track") {
             telemetryStatus.classList.remove("deviated");
             telemetryStatus.classList.add("on-track");
@@ -951,10 +1195,19 @@ async function telemetryTick() {
             telemetryStatus.classList.remove("on-track");
             telemetryStatus.classList.add("deviated");
             telemetryText.textContent = "\u26a0 Deviation detected! Vehicle off-route";
+            clearInterval(telemetryInterval);
+            telemetryInterval = null;
+            btnWrongTurn.classList.add("hidden");
+            btnStartNav.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                Start Navigation`;
+            btnStartNav.classList.remove("navigating");
+            isNavigating = false;
+            alert("You left the route. Recalculate?");
         } else if (data.status === "no_session") {
-            console.error("[FLEET] Server has no session for", SESSION_ID,
-                          "\u2014 re-registering trip...");
-            // Attempt to re-register the trip automatically
+            console.error("[FLEET] Server has no session for", SESSION_ID, "\u2014 re-registering...");
             if (lastRoutePath && lastRoutePath.length >= 2) {
                 fetch("/api/start_trip", {
                     method: "POST",
@@ -969,16 +1222,15 @@ async function telemetryTick() {
         console.error("[FLEET] Telemetry ping failed:", err);
     }
 
-    // Check if the car has reached the end of the route
+    // Check if simulation reached end of polyline
     if (carStepIndex >= routePolylineCoords.length - 1 && !simulateDeviation) {
-        console.log("[FLEET] Navigation complete \u2014 reached destination.");
+        console.log("[FLEET] Simulation complete \u2014 reached end of polyline.");
         telemetryText.textContent = "\u2713 Arrived at destination";
         telemetryStatus.classList.remove("deviated");
         telemetryStatus.classList.add("on-track");
         clearInterval(telemetryInterval);
         telemetryInterval = null;
 
-        // Release edge slots on the backend — trip is complete
         const sid = SESSION_ID;
         fetch('/api/end_trip', {
             method: 'POST',
@@ -989,7 +1241,6 @@ async function telemetryTick() {
         .then(d => console.log('[FLEET] end_trip (completed):', d))
         .catch(e => console.warn('[FLEET] end_trip failed on completion:', e));
 
-        // Keep the car at destination but disable wrong turn
         btnWrongTurn.classList.add("hidden");
         btnStartNav.innerHTML = `
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1000,6 +1251,13 @@ async function telemetryTick() {
         isNavigating = false;
     }
 }
+
+// Re-acquire Wake Lock when user returns to the tab (browser releases it on tab switch)
+document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && isNavigating && !wakeLockSentinel) {
+        await acquireWakeLock();
+    }
+});
 
 // ── Button Event Listeners ──────────────────────────────────────
 btnStartNav.addEventListener("click", () => {
@@ -1013,5 +1271,5 @@ btnStartNav.addEventListener("click", () => {
 btnWrongTurn.addEventListener("click", () => {
     if (!isNavigating) return;
     simulateDeviation = true;
-    console.log("[FLEET] Wrong turn simulation queued \u2014 will deviate on next telemetry tick.");
+    console.log("[FLEET] Wrong turn simulation queued \u2014 will deviate on next GPS fix.");
 });
