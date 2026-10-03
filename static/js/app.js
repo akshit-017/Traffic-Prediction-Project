@@ -70,6 +70,7 @@ let carStepIndex = 0;           // Current position along routePolylineCoords (s
 let isNavigating = false;       // Whether navigation is active
 let simulateDeviation = false;  // Flag to trigger wrong-turn on next tick
 let destinationCoords = null;   // [lat, lng] of the route destination for proximity check
+let lastTelemetryTime = 0;      // Timestamp of last telemetry ping
 
 // ── DOM Elements ────────────────────────────────────────────────
 const sourceSelect     = document.getElementById("source");
@@ -794,6 +795,7 @@ function resetNavUI() {
     isNavigating = false;
     simulateDeviation = false;
     carStepIndex = 0;
+    lastTelemetryTime = 0;
 }
 
 /**
@@ -1021,6 +1023,13 @@ async function onGPSPosition(position) {
             return;
         }
     }
+
+    // ── Throttle: The Telemetry Firehose Fix ────────────────────────
+    const now = Date.now();
+    if (now - lastTelemetryTime < 2500) {
+        return; // Ignore excess GPS pings to prevent overwhelming the backend
+    }
+    lastTelemetryTime = now;
 
     // ── Send telemetry to backend ───────────────────────────────────
     try {

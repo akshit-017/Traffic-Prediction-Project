@@ -749,18 +749,62 @@ def _haversine(lat1, lng1, lat2, lng2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def _point_to_segment_dist(lat, lng, lat1, lng1, lat2, lng2):
+    """
+    Calculate shortest distance in meters from point (lat, lng) to line segment 
+    (lat1, lng1)-(lat2, lng2) using an equirectangular projection approximation.
+    """
+    R = 6371000 # meters
+    lat, lng, lat1, lng1, lat2, lng2 = map(math.radians, [lat, lng, lat1, lng1, lat2, lng2])
+    cos_lat = math.cos((lat1 + lat2) / 2.0)
+    
+    x, y = lng * cos_lat, lat
+    x1, y1 = lng1 * cos_lat, lat1
+    x2, y2 = lng2 * cos_lat, lat2
+    
+    dx, dy = x2 - x1, y2 - y1
+    length_sq = dx*dx + dy*dy
+    
+    if length_sq == 0:
+        return _haversine(math.degrees(lat), math.degrees(lng), math.degrees(lat1), math.degrees(lng1))
+        
+    t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length_sq))
+    return math.hypot(x - (x1 + t * dx), y - (y1 + t * dy)) * R
+
+
+def _update_session_edges(session_id: str, new_edges: list = None):
+    """
+    Unified helper to update a session's edge counters. Thread-safe.
+    Pass new_edges (list of edge tuples) to register, or None to end trip.
+    """
+    with _fleet_lock:
+        session = active_sessions.get(session_id, {})
+        old_edges = session.get("assigned_edges", [])
+        
+        for edge in old_edges:
+            key = tuple(edge)
+            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+            if edge_counters[key] == 0:
+                edge_counters.pop(key, None)
+                
+        if not new_edges:
+            active_sessions.pop(session_id, None)
+            return len(old_edges)
+            
+        for edge in new_edges:
+            key = tuple(edge)
+            edge_counters[key] = edge_counters.get(key, 0) + 1
+            
+        if session_id not in active_sessions:
+            active_sessions[session_id] = {"registered_at": _time.time()}
+            
+        active_sessions[session_id]["assigned_edges"] = new_edges
+        active_sessions[session_id]["last_seen"] = _time.time()
+        return len(new_edges)
+
+
 @app.route("/api/start_trip", methods=["POST"])
 def start_trip():
-    """
-    Register a vehicle on the fleet routing system.
-
-    Accepts:
-        { "session_id": "abc-123", "path": ["NodeA", "NodeB", "NodeC"] }
-
-    Increments edge_counters for every edge on the path and stores
-    the session in active_sessions.  Multiple concurrent sessions are
-    fully supported — this only touches the counters for THIS session.
-    """
     payload = request.json or {}
     session_id = payload.get("session_id", "").strip()
     path = payload.get("path", [])
@@ -768,72 +812,19 @@ def start_trip():
     if not session_id or len(path) < 2:
         return jsonify({"error": "session_id and a path with ≥2 nodes are required."}), 400
 
-    with _fleet_lock:
-        print(f"[START_TRIP] Called: session={session_id!r}, path_nodes={len(path)}, "
-              f"currently_active_sessions={len(active_sessions)}, "
-              f"current_edge_total={sum(edge_counters.values())}")
+    edges = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
+    edges_tracked = _update_session_edges(session_id, edges)
 
-        # ── Release this session's OLD edges before re-registering ────
-        # This handles the case where the same session_id re-routes mid-trip.
-        # IMPORTANT: we only decrement edges belonging to THIS session —
-        # other sessions' counters are completely untouched.
-        released_count = 0
-        if session_id in active_sessions:
-            old_edges = active_sessions[session_id].get("assigned_edges", [])
-            print(f"[START_TRIP] Re-registering existing session={session_id!r}: "
-                  f"releasing {len(old_edges)} old edges first")
-            for edge in old_edges:
-                key = tuple(edge)
-                edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-                if edge_counters[key] == 0:
-                    edge_counters.pop(key, None)
-                released_count += 1
-
-        # ── Register new edges and increment counters ─────────────────
-        edges = []
-        for i in range(len(path) - 1):
-            edge = (path[i], path[i + 1])
-            edges.append(edge)
-            edge_counters[edge] = edge_counters.get(edge, 0) + 1
-
-        active_sessions[session_id] = {
-            "assigned_edges": edges,
-            "last_seen": _time.time(),
-            "source": path[0],
-            "destination": path[-1],
-            "registered_at": _time.time(),
-        }
-
-        print(f"[START_TRIP] Registered: session={session_id!r}, "
-              f"new_edges={len(edges)}, released_old_edges={released_count}, "
-              f"total_active_sessions={len(active_sessions)}, "
-              f"total_edge_slots={sum(edge_counters.values())}")
-
-        return jsonify({
-            "status": "registered",
-            "session_id": session_id,
-            "edges_tracked": len(edges),
-            "total_active_sessions": len(active_sessions),
-        })
+    print(f"[START_TRIP] Registered: session={session_id!r}, edges_tracked={edges_tracked}")
+    return jsonify({
+        "status": "registered",
+        "session_id": session_id,
+        "edges_tracked": edges_tracked,
+    })
 
 
 @app.route("/api/end_trip", methods=["POST"])
 def end_trip():
-    """
-    Explicitly release a session's edge slots from fleet state.
-
-    Accepts:
-        { "session_id": "abc-123", "reason": "completed" | "rerouted" | "cancelled" }
-
-    Call this when:
-      - Navigation completes (car reaches destination)
-      - The user selects a new route (rerouted)
-      - The user manually stops navigation (cancelled)
-
-    This is safe to call multiple times for the same session_id;
-    if the session is already gone it returns {"status": "already_gone"}.
-    Other active sessions are NEVER affected.
-    """
     payload = request.json or {}
     session_id = payload.get("session_id", "").strip()
     reason = payload.get("reason", "unknown")
@@ -842,182 +833,104 @@ def end_trip():
         return jsonify({"error": "session_id is required."}), 400
 
     with _fleet_lock:
-        session = active_sessions.get(session_id)
-        if not session:
-            print(f"[END_TRIP] Session {session_id!r} not found (already gone or never started). "
-                  f"reason={reason!r}")
+        if session_id not in active_sessions:
             return jsonify({"status": "already_gone", "session_id": session_id})
 
-        # Release only this session's edges
-        edges = session.get("assigned_edges", [])
-        for edge in edges:
-            key = tuple(edge)
-            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-            if edge_counters[key] == 0:
-                edge_counters.pop(key, None)
-
-        active_sessions.pop(session_id, None)
-
-        print(f"[END_TRIP] Released: session={session_id!r}, reason={reason!r}, "
-              f"edges_released={len(edges)}, "
-              f"remaining_active_sessions={len(active_sessions)}, "
-              f"remaining_edge_slots={sum(edge_counters.values())}")
-
-        return jsonify({
-            "status": "released",
-            "session_id": session_id,
-            "edges_released": len(edges),
-            "reason": reason,
-            "remaining_active_sessions": len(active_sessions),
-        })
+    edges_released = _update_session_edges(session_id, None)
+    
+    print(f"[END_TRIP] Released: session={session_id!r}, reason={reason!r}, edges_released={edges_released}")
+    return jsonify({
+        "status": "released",
+        "session_id": session_id,
+        "edges_released": edges_released,
+        "reason": reason,
+    })
 
 
 @app.route("/api/telemetry", methods=["POST"])
 def telemetry():
-    """
-    Receive a telemetry ping from a driving client.
-
-    Accepts:
-        { "session_id": "abc-123", "lat": 12.97, "lng": 77.59 }
-
-    Compares the current position to the assigned route edges.
-    Returns {"status": "on_track"} or {"status": "deviated"}.
-    On deviation the session's edges are decremented from edge_counters.
-    """
     payload = request.json or {}
     session_id = payload.get("session_id", "").strip()
     lat = payload.get("lat")
     lng = payload.get("lng")
 
-    # ── Debug: log every incoming ping to Render stdout ──────────
-    print(f"[TELEMETRY] Ping received: session={session_id!r}, "
-          f"lat={lat}, lng={lng}, "
-          f"active_sessions={len(active_sessions)}, "
-          f"tracked_edges={len(edge_counters)}")
-
     if not session_id or lat is None or lng is None:
-        print(f"[TELEMETRY] ERROR: Missing required fields "
-              f"(session_id={session_id!r}, lat={lat}, lng={lng})")
         return jsonify({"error": "session_id, lat, and lng are required."}), 400
 
+    # 1. Threading Deadlock fix: Copy assigned_edges and release lock immediately
     with _fleet_lock:
         session = active_sessions.get(session_id)
         if not session:
-            # This means /api/start_trip was never called for this session,
-            # or the session was already evicted (deviation / stale cleanup).
-            print(f"[TELEMETRY] WARNING: No active session for id={session_id!r}. "
-                  f"Known sessions: {list(active_sessions.keys())}")
             return jsonify({"status": "no_session"}), 404
-
-        # Update last seen
+        edges = list(session.get("assigned_edges", []))
         session["last_seen"] = _time.time()
+        
+    DEVIATION_THRESHOLD_M = 100
+    on_route = False
 
-        # Check proximity to any assigned edge (within 100 m)
-        # 100m is appropriate for real GPS hardware (accurate to ~5-15m).
-        # The old 500m was for simulation; real-world needs tighter tolerance.
-        DEVIATION_THRESHOLD_M = 100
-        on_route = False
-        closest_dist_m = float("inf")
+    # 2. Edge Snapping fix: math done OUTSIDE the lock to prevent blocking
+    for edge in edges:
+        u_id, v_id = edge
+        u_node = GRAPH.nodes.get(u_id, {})
+        v_node = GRAPH.nodes.get(v_id, {})
 
-        for edge in session["assigned_edges"]:
-            u_id, v_id = edge
-            u_node = GRAPH.nodes.get(u_id, {})
-            v_node = GRAPH.nodes.get(v_id, {})
+        u_lat, u_lng = u_node.get("lat", 0), u_node.get("lng", 0)
+        v_lat, v_lng = v_node.get("lat", 0), v_node.get("lng", 0)
 
-            u_lat, u_lng = u_node.get("lat", 0), u_node.get("lng", 0)
-            v_lat, v_lng = v_node.get("lat", 0), v_node.get("lng", 0)
+        # Calculates distance to the segment line, not just the sparse endpoints
+        dist = _point_to_segment_dist(lat, lng, u_lat, u_lng, v_lat, v_lng)
+        
+        if dist <= DEVIATION_THRESHOLD_M:
+            on_route = True
+            break
 
-            # Check distance to either endpoint of the edge
-            dist_u = _haversine(lat, lng, u_lat, u_lng)
-            dist_v = _haversine(lat, lng, v_lat, v_lng)
+    if on_route:
+        return jsonify({"status": "on_track"})
 
-            # Also check distance to the midpoint
-            mid_lat, mid_lng = (u_lat + v_lat) / 2, (u_lng + v_lng) / 2
-            dist_mid = _haversine(lat, lng, mid_lat, mid_lng)
-
-            edge_min = min(dist_u, dist_v, dist_mid)
-            closest_dist_m = min(closest_dist_m, edge_min)
-
-            if edge_min <= DEVIATION_THRESHOLD_M:
-                on_route = True
-                break
-
-        if on_route:
-            print(f"[TELEMETRY] ON_TRACK: session={session_id!r}, "
-                  f"pos=({lat:.4f},{lng:.4f}), closest_edge_dist={closest_dist_m:.0f}m, "
-                  f"active_sessions={len(active_sessions)}, "
-                  f"edge_counters={sum(edge_counters.values())}")
-            return jsonify({"status": "on_track"})
-
-        # ── Deviated: decrement counters and remove session ──────────
-        for edge in session["assigned_edges"]:
-            key = tuple(edge)
-            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-            if edge_counters[key] == 0:
-                edge_counters.pop(key, None)
-
-        active_sessions.pop(session_id, None)
-
-        print(f"[TELEMETRY] DEVIATED: session={session_id!r}, "
-              f"pos=({lat:.4f},{lng:.4f}), closest_edge_dist={closest_dist_m:.0f}m, "
-              f"edges_released={len(session['assigned_edges'])}, "
-              f"remaining_active_sessions={len(active_sessions)}")
-
-        return jsonify({"status": "deviated"})
+    _update_session_edges(session_id, None)
+    print(f"[TELEMETRY] DEVIATED: session={session_id!r}")
+    return jsonify({"status": "deviated"})
 
 
 @app.route("/api/fleet_status", methods=["GET"])
 def fleet_status():
-    """
-    Debug endpoint: return current fleet state.
-    Shows active sessions, edge load counters, and total tracked vehicles.
-    """
     with _fleet_lock:
-        # Clean up stale sessions (idle > 10 minutes)
-        STALE_THRESHOLD = 600  # seconds
+        STALE_THRESHOLD = 600
         now = _time.time()
         stale_ids = [
             sid for sid, sdata in active_sessions.items()
             if now - sdata.get("last_seen", 0) > STALE_THRESHOLD
         ]
-        for sid in stale_ids:
-            for edge in active_sessions[sid].get("assigned_edges", []):
-                key = tuple(edge)
-                edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-                if edge_counters[key] == 0:
-                    edge_counters.pop(key, None)
-            active_sessions.pop(sid, None)
-            print(f"[FLEET] Stale session cleaned: {sid}")
+        
+    for sid in stale_ids:
+        _update_session_edges(sid, None)
+        print(f"[FLEET] Stale session cleaned: {sid}")
 
+    with _fleet_lock:
         active_count = len(active_sessions)
         edge_total   = sum(edge_counters.values())
+        sessions_copy = {
+            sid: {
+                "edges": len(sdata.get("assigned_edges", [])),
+                "idle_seconds": round(_time.time() - sdata.get("last_seen", _time.time())),
+            }
+            for sid, sdata in active_sessions.items()
+        }
+        edge_loads_copy = {
+            f"{u}->{v}": count
+            for (u, v), count in edge_counters.items()
+        }
 
-        print(f"[FLEET_STATUS] active_sessions={active_count}, "
-              f"tracked_edges={len(edge_counters)}, "
-              f"total_vehicle_edge_slots={edge_total}, "
-              f"stale_cleaned={len(stale_ids)}")
-
-        return jsonify({
-            # Primary keys (used internally)
-            "active_sessions": active_count,
-            "tracked_edges": len(edge_counters),
-            "total_vehicle_edge_slots": edge_total,
-            # Alias keys — match what the frontend / monitoring dashboards expect
-            "active_vehicles": active_count,
-            "edge_counters": edge_total,
-            "sessions": {
-                sid: {
-                    "edges": len(sdata.get("assigned_edges", [])),
-                    "idle_seconds": round(now - sdata.get("last_seen", now)),
-                }
-                for sid, sdata in active_sessions.items()
-            },
-            "edge_loads": {
-                f"{u}->{v}": count
-                for (u, v), count in edge_counters.items()
-            },
-            "stale_cleaned": len(stale_ids),
-        })
+    return jsonify({
+        "active_sessions": active_count,
+        "tracked_edges": len(edge_loads_copy),
+        "total_vehicle_edge_slots": edge_total,
+        "active_vehicles": active_count,
+        "edge_counters": edge_total,
+        "sessions": sessions_copy,
+        "edge_loads": edge_loads_copy,
+        "stale_cleaned": len(stale_ids),
+    })
 
 
 if __name__ == "__main__":
