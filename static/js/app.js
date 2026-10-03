@@ -1061,28 +1061,13 @@ async function onGPSPosition(position) {
 
         } else if (data.status === "deviated") {
             // ── Stop Condition 2: Backend says deviated ─────────────────
-            telemetryStatus.classList.remove("on-track");
+            // Call stopNavigation which clears watch, releases wake lock, and fires /api/end_trip
+            stopNavigation('deviated');
+
+            // Re-show the deviation status since stopNavigation hides it
+            telemetryStatus.classList.remove("hidden", "on-track");
             telemetryStatus.classList.add("deviated");
             telemetryText.textContent = "\u26a0 Deviation detected! Vehicle off-route";
-
-            // Stop tracking immediately
-            if (geoWatchId !== null) {
-                navigator.geolocation.clearWatch(geoWatchId);
-                geoWatchId = null;
-            }
-            if (wakeLockSentinel) {
-                wakeLockSentinel.release().catch(() => {});
-                wakeLockSentinel = null;
-            }
-
-            btnWrongTurn.classList.add("hidden");
-            btnStartNav.innerHTML = `
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="5 3 19 12 5 21 5 3"/>
-                </svg>
-                Start Navigation`;
-            btnStartNav.classList.remove("navigating");
-            isNavigating = false;
 
             // Alert the user and offer recalculation
             alert("You left the route. Recalculate?");
@@ -1201,19 +1186,14 @@ async function simulationTick() {
             telemetryStatus.classList.add("on-track");
             telemetryText.textContent = `Telemetry active \u00b7 On track (step ${carStepIndex}/${routePolylineCoords.length - 1})`;
         } else if (data.status === "deviated") {
-            telemetryStatus.classList.remove("on-track");
+            // Call stopNavigation which clears watch, releases wake lock, and fires /api/end_trip
+            stopNavigation('deviated');
+
+            // Re-show the deviation status since stopNavigation hides it
+            telemetryStatus.classList.remove("hidden", "on-track");
             telemetryStatus.classList.add("deviated");
             telemetryText.textContent = "\u26a0 Deviation detected! Vehicle off-route";
-            clearInterval(telemetryInterval);
-            telemetryInterval = null;
-            btnWrongTurn.classList.add("hidden");
-            btnStartNav.innerHTML = `
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="5 3 19 12 5 21 5 3"/>
-                </svg>
-                Start Navigation`;
-            btnStartNav.classList.remove("navigating");
-            isNavigating = false;
+
             alert("You left the route. Recalculate?");
         } else if (data.status === "no_session") {
             console.error("[FLEET] Server has no session for", SESSION_ID, "\u2014 re-registering...");

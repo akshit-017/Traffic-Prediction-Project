@@ -8,6 +8,7 @@ Enterprise-grade traffic routing combining:
   - Dijkstra pathfinding on a 30-node Bengaluru road graph
   - MySQL telemetry logging (resilient)
   - Per-edge congestion color prediction (/api/predict_route)
+  - Fleet anti-herding via exponential edge penalties (1.15 ** fleet_count)
 """
 
 import json
@@ -26,6 +27,11 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from bengaluru_graph import load_graph
 from database import init_db, log_telemetry
+from route_optimization import (
+    compute_weighted_graph,
+    find_optimal_route,
+    is_peak_hour,
+)
 
 # ── Constants ────────────────────────────────────────────────────────
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -33,18 +39,12 @@ TOMTOM_API_KEY = os.environ.get("TOMTOM_API_KEY")
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 MODEL_PATH = os.path.join(MODELS_DIR, "best_traffic_model.pkl")
 
-# ── Realistic Bengaluru speed profiles (km/h) ───────────────────────
-# Based on Bengaluru Traffic Police / Google Maps data
-SPEED_PROFILES = {
-    # hour_range: (weekday_speed, weekend_speed)
-    "night":      (35, 40),   # 22:00 – 06:00
-    "early_am":   (30, 38),   # 06:00 – 08:00
-    "morning_pk": (14, 28),   # 08:00 – 11:30  (heavy congestion)
-    "midday":     (22, 30),   # 11:30 – 16:00
-    "evening_pk": (12, 25),   # 17:00 – 20:30  (worst congestion)
-    "late_eve":   (25, 32),   # 20:30 – 22:00
-    "pre_pk":     (18, 28),   # 16:00 – 17:00
-}
+# ── Master Toggle: Live API vs. Pure ML Prediction (Spec §1) ────────
+# When False: bypasses TomTom entirely, defaults to the trained
+# HistGradientBoostingRegressor for all edge weight predictions.
+# When True: TomTom live speeds are attempted first, ML is the fallback.
+# To enforce pure ML prediction mode, set this to False explicitly.
+USE_LIVE_API = bool(TOMTOM_API_KEY)
 
 # ── Congestion color thresholds ──────────────────────────────────────
 GREEN_SPEED_THRESHOLD  = 25  # km/h — above this = Optimal / Clear
@@ -52,25 +52,24 @@ YELLOW_SPEED_THRESHOLD = 15  # km/h — above this but ≤ 25 = Moderate
 # Below 15 km/h = Red / Heavy Traffic
 
 
-def _get_speed_for_time(hour: float, is_weekend: bool) -> float:
-    """Return realistic average speed (km/h) for a given hour."""
-    idx = 1 if is_weekend else 0
-    if hour < 6:
-        return SPEED_PROFILES["night"][idx]
-    elif hour < 8:
-        return SPEED_PROFILES["early_am"][idx]
-    elif hour < 11.5:
-        return SPEED_PROFILES["morning_pk"][idx]
-    elif hour < 16:
-        return SPEED_PROFILES["midday"][idx]
-    elif hour < 17:
-        return SPEED_PROFILES["pre_pk"][idx]
-    elif hour < 20.5:
-        return SPEED_PROFILES["evening_pk"][idx]
-    elif hour < 22:
-        return SPEED_PROFILES["late_eve"][idx]
+def _congestion_color(speed_kmh: float) -> str:
+    """Return Green / Yellow / Red hex color based on predicted speed."""
+    if speed_kmh > GREEN_SPEED_THRESHOLD:
+        return "#4A9B6B"   # Muted green — Clear / Optimal
+    elif speed_kmh > YELLOW_SPEED_THRESHOLD:
+        return "#C4963E"   # Muted amber — Moderate
     else:
-        return SPEED_PROFILES["night"][idx]
+        return "#B84C3E"   # Muted red — Heavy Traffic
+
+
+def _congestion_label(speed_kmh: float) -> str:
+    """Return human-readable congestion label."""
+    if speed_kmh > GREEN_SPEED_THRESHOLD:
+        return "Clear"
+    elif speed_kmh > YELLOW_SPEED_THRESHOLD:
+        return "Moderate"
+    else:
+        return "Heavy"
 
 
 # ── Flask App ────────────────────────────────────────────────────────
@@ -151,281 +150,68 @@ def _get_ist_datetime(departure_time: str = None) -> datetime:
     return datetime.now(IST)
 
 
-def _is_peak_hour(hour: float) -> int:
-    """Return 1 if hour falls within morning (08-11:30) or evening (17-20:30) peak."""
-    return int((8 <= hour < 11.5) or (17 <= hour < 20.5))
+def _haversine(lat1, lng1, lat2, lng2):
+    """Return distance in meters between two lat/lng points."""
+    R = 6_371_000  # Earth radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def _congestion_color(speed_kmh: float) -> str:
-    """Return Green / Yellow / Red hex color based on predicted speed."""
-    if speed_kmh > GREEN_SPEED_THRESHOLD:
-        return "#4A9B6B"   # Muted green — Clear / Optimal
-    elif speed_kmh > YELLOW_SPEED_THRESHOLD:
-        return "#C4963E"   # Muted amber — Moderate
-    else:
-        return "#B84C3E"   # Muted red — Heavy Traffic
-
-
-def _congestion_label(speed_kmh: float) -> str:
-    """Return human-readable congestion label."""
-    if speed_kmh > GREEN_SPEED_THRESHOLD:
-        return "Clear"
-    elif speed_kmh > YELLOW_SPEED_THRESHOLD:
-        return "Moderate"
-    else:
-        return "Heavy"
-
-
-def _query_tomtom_speed(lat: float, lng: float) -> tuple[float, float] | None:
+def _point_to_segment_dist(lat, lng, lat1, lng1, lat2, lng2):
     """
-    Query TomTom Traffic Flow API for current speed at a coordinate.
-    Returns (speed_kmh, free_flow_speed_kmh) or None on failure.
+    Calculate shortest distance in meters from point (lat, lng) to line segment 
+    (lat1, lng1)-(lat2, lng2) using an equirectangular projection approximation.
     """
-    if not TOMTOM_API_KEY:
-        return None
-
-    url = (
-        f"https://api.tomtom.com/traffic/services/4/flowSegmentData"
-        f"/absolute/10/json"
-        f"?point={lat},{lng}"
-        f"&key={TOMTOM_API_KEY}"
-    )
-    try:
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        flow = data.get("flowSegmentData", {})
-        speed = flow.get("currentSpeed")
-        free_flow = flow.get("freeFlowSpeed", speed)
-        if speed and speed > 0:
-            return (float(speed), float(free_flow) if free_flow else float(speed))
-    except Exception:
-        pass
-    return None
+    R = 6371000 # meters
+    lat, lng, lat1, lng1, lat2, lng2 = map(math.radians, [lat, lng, lat1, lng1, lat2, lng2])
+    cos_lat = math.cos((lat1 + lat2) / 2.0)
+    
+    x, y = lng * cos_lat, lat
+    x1, y1 = lng1 * cos_lat, lat1
+    x2, y2 = lng2 * cos_lat, lat2
+    
+    dx, dy = x2 - x1, y2 - y1
+    length_sq = dx*dx + dy*dy
+    
+    if length_sq == 0:
+        return _haversine(math.degrees(lat), math.degrees(lng), math.degrees(lat1), math.degrees(lng1))
+        
+    t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length_sq))
+    return math.hypot(x - (x1 + t * dx), y - (y1 + t * dy)) * R
 
 
-def _assign_live_weights(graph: nx.Graph) -> tuple[bool, str]:
+def _update_session_edges(session_id: str, new_edges: list = None):
     """
-    Assign edge weights using TomTom live traffic data.
-    Returns (fallback_triggered, mode_label).
+    Unified helper to update a session's edge counters. Thread-safe.
+    Pass new_edges (list of edge tuples) to register, or None to end trip.
     """
-    fallback = False
-    now = datetime.now(IST)
-    hour = now.hour + now.minute / 60.0
-    is_weekend = now.weekday() >= 5
-
-    for u, v, data in graph.edges(data=True):
-        dist_km = data.get("distance_km", 1.0)
-
-        # Use midpoint of edge for TomTom query
-        u_data = graph.nodes[u]
-        v_data = graph.nodes[v]
-        mid_lat = (u_data["lat"] + v_data["lat"]) / 2
-        mid_lng = (u_data["lng"] + v_data["lng"]) / 2
-
-        result = _query_tomtom_speed(mid_lat, mid_lng)
-
-        if result is not None:
-            speed, free_flow = result
-            weight = (dist_km / speed) * 60.0
-            congestion = free_flow / speed if speed > 0 else 1.0
-        else:
-            # Fallback to realistic speed profile
-            fallback = True
-            speed = _get_speed_for_time(hour, is_weekend)
-            # Deterministic per-edge variation (±15%) for realism
-            edge_hash = hash((u, v)) % 10000 / 10000.0  # 0.0 – 1.0
-            variation = 0.85 + edge_hash * 0.30  # 0.85 – 1.15
-            effective_speed = speed * variation
-            weight = (dist_km / effective_speed) * 60.0
-            # Estimate congestion from speed vs free-flow
-            free_flow_speed = _get_speed_for_time(3, False)  # 3 AM = free flow
-            congestion = free_flow_speed / effective_speed
-
-        data["weight"] = round(weight, 2)
-        data["congestion_multiplier"] = round(max(1.0, min(3.0, congestion)), 2)
-
-    mode_label = "Live Telemetry Feed"
-    if fallback and ML_MODEL is not None:
-        mode_label = "ML Fallback Active"
-    elif fallback:
-        mode_label = "Speed Profile Estimate"
-
-    return fallback, mode_label
-
-
-def _predict_edge_travel_time(u: str, v: str, dist_km: float,
-                               hour_of_day: float, day_of_week: int,
-                               is_peak: int, base_speed: float) -> float:
-    """
-    Predict travel time (minutes) for a single edge using the realistic
-    Bengaluru speed profile, optionally adjusted by an ML congestion factor.
-
-    The base_speed already reflects time-of-day congestion (e.g. 12 km/h
-    during evening peak). The ML model, if available, provides an additional
-    congestion multiplier to fine-tune per-edge.
-    """
-    import pandas as pd
-
-    # Start with the realistic speed-profile estimate
-    effective_speed = max(5.0, base_speed)
-
-    # If ML model is loaded, use it to derive a congestion adjustment
-    if ML_MODEL is not None:
-        try:
-            if _MODEL_FEATURE_NAMES is not None:
-                features = {}
-                for col in _MODEL_FEATURE_NAMES:
-                    if col == "hour_of_day":
-                        features[col] = [hour_of_day]
-                    elif col == "day_of_week":
-                        features[col] = [day_of_week]
-                    elif col == "is_peak_hour":
-                        features[col] = [is_peak]
-                    elif col == "sourceid":
-                        features[col] = [hash(u) % 10000]
-                    elif col == "dstid":
-                        features[col] = [hash(v) % 10000]
-                    elif col in ("standard_deviation_travel_time",
-                                 "geometric_standard_deviation_travel_time"):
-                        features[col] = [0.0]
-                    elif col == "geometric_mean_travel_time":
-                        features[col] = [(dist_km / max(base_speed, 5)) * 3600]
-                    else:
-                        features[col] = [0.0]
-                df = pd.DataFrame(features)
-            else:
-                df = pd.DataFrame({
-                    "hour_of_day": [hour_of_day],
-                    "day_of_week": [day_of_week],
-                    "is_peak_hour": [is_peak],
-                    "sourceid": [hash(u) % 10000],
-                    "dstid": [hash(v) % 10000],
-                })
-
-            prediction = float(ML_MODEL.predict(df)[0])
-
-            # The model predicts travel_time_min (mean_travel_time / 60).
-            # Use it to derive a congestion multiplier relative to free-flow.
-            # Free-flow baseline: ~35 km/h → 5 km in ~8.6 min.
-            free_flow_estimate = (dist_km / 35.0) * 60.0  # minutes at free flow
-            if free_flow_estimate > 0 and prediction > 0:
-                ml_congestion = prediction / max(free_flow_estimate, 0.5)
-                ml_congestion = max(0.8, min(3.0, ml_congestion))
-                # Blend: 70% speed-profile + 30% ML adjustment
-                effective_speed = effective_speed / (0.7 + 0.3 * ml_congestion)
-                effective_speed = max(5.0, effective_speed)
-
-        except Exception as e:
-            print(f"[ML] Prediction failed for {u}->{v}: {e}")
-
-    # time = distance / speed, converted to minutes
-    travel_time_min = (dist_km / effective_speed) * 60.0
-    return max(0.5, travel_time_min)
-
-
-def _assign_predictive_weights(graph: nx.Graph, departure: datetime) -> tuple[bool, str]:
-    """
-    Assign edge weights using the ML model for congestion prediction
-    combined with time-aware speed profiles for realistic travel times.
-    Returns (fallback_triggered, mode_label).
-    """
-    hour_of_day = departure.hour + departure.minute / 60.0
-    day_of_week = departure.weekday()
-    is_weekend = day_of_week >= 5
-    is_peak = _is_peak_hour(hour_of_day)
-    base_speed = _get_speed_for_time(hour_of_day, is_weekend)
-    free_flow_speed = _get_speed_for_time(3, False)  # 3 AM reference
-
-    if ML_MODEL is None:
-        # No ML model — use speed profile heuristic
-        for u, v, data in graph.edges(data=True):
-            dist_km = data.get("distance_km", 1.0)
-            weight = (dist_km / base_speed) * 60.0
-            congestion = free_flow_speed / base_speed
-            data["weight"] = round(weight, 2)
-            data["congestion_multiplier"] = round(max(1.0, min(3.0, congestion)), 2)
-        return True, "Heuristic Fallback (No Model)"
-
-    import pandas as pd
-
-    fallback_triggered = False
-
-    for u, v, data in graph.edges(data=True):
-        dist_km = data.get("distance_km", 1.0)
-
-        try:
-            # Build feature row matching the Uber Movement schema
-            # the model was trained on (8 numeric features)
-            features = {
-                "hour_of_day": [hour_of_day],
-                "day_of_week": [day_of_week],
-                "is_peak_hour": [is_peak],
-                "sourceid": [hash(u) % 10000],
-                "dstid": [hash(v) % 10000],
-                "standard_deviation_travel_time": [0.0],
-                "geometric_mean_travel_time": [(dist_km / max(base_speed, 5)) * 3600],
-                "geometric_standard_deviation_travel_time": [0.0],
-            }
-
-            df = pd.DataFrame(features)
-            predicted_time_min = float(ML_MODEL.predict(df)[0])
-
-            # The model predicts travel_time_min directly.
-            # Use it to derive a congestion multiplier relative to free-flow.
-            free_flow_estimate = (dist_km / 35.0) * 60.0  # minutes at free flow
-            if free_flow_estimate > 0 and predicted_time_min > 0:
-                ml_congestion = predicted_time_min / max(free_flow_estimate, 0.5)
-                ml_congestion = max(0.8, min(3.0, ml_congestion))
-            else:
-                ml_congestion = 1.0
-
-            # Compute weight using time-aware speed adjusted by ML congestion
-            effective_speed = base_speed / ml_congestion
-            effective_speed = max(5.0, effective_speed)  # minimum 5 km/h
-            weight = (dist_km / effective_speed) * 60.0
-
-            # Deterministic per-edge variation for realism
-            edge_hash = hash((u, v)) % 10000 / 10000.0
-            variation = 0.92 + edge_hash * 0.16  # 0.92 – 1.08
-            weight *= variation
-
-            congestion = ml_congestion
-
-        except Exception as e:
-            # Fallback for this edge: pure speed profile
-            print(f"[ML] _assign_predictive_weights failed for {u}->{v}: {e}")
-            fallback_triggered = True
-            weight = (dist_km / base_speed) * 60.0
-            congestion = free_flow_speed / base_speed
-
-        data["weight"] = round(max(0.5, weight), 2)
-        data["congestion_multiplier"] = round(max(1.0, min(3.0, congestion)), 2)
-
-    model_name = ML_MODEL_NAME or "ML"
-    if fallback_triggered:
-        return True, f"{model_name} (Partial Fallback)"
-    return False, f"{model_name} Historical Model"
-
-
-def _compute_route(graph: nx.Graph, source: str, destination: str):
-    """
-    Run Dijkstra and return (path, total_distance_km, travel_time_min).
-    Returns (None, 0, 0) if no path exists.
-    """
-    try:
-        path = nx.dijkstra_path(graph, source, destination, weight="weight")
-        travel_time = nx.dijkstra_path_length(graph, source, destination, weight="weight")
-    except (nx.NetworkXNoPath, nx.NodeNotFound):
-        return None, 0, 0
-
-    # Sum physical distances along path
-    total_dist = 0.0
-    for i in range(len(path) - 1):
-        edge_data = graph.edges[path[i], path[i + 1]]
-        total_dist += edge_data.get("distance_km", 0)
-
-    return path, round(total_dist, 1), round(travel_time)
+    with _fleet_lock:
+        session = active_sessions.get(session_id, {})
+        old_edges = session.get("assigned_edges", [])
+        
+        for edge in old_edges:
+            key = tuple(edge)
+            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
+            if edge_counters[key] == 0:
+                edge_counters.pop(key, None)
+                
+        if not new_edges:
+            active_sessions.pop(session_id, None)
+            return len(old_edges)
+            
+        for edge in new_edges:
+            key = tuple(edge)
+            edge_counters[key] = edge_counters.get(key, 0) + 1
+            
+        if session_id not in active_sessions:
+            active_sessions[session_id] = {"registered_at": _time.time()}
+            
+        active_sessions[session_id]["assigned_edges"] = new_edges
+        active_sessions[session_id]["last_seen"] = _time.time()
+        return len(new_edges)
 
 
 # =====================================================================
@@ -492,64 +278,50 @@ def predict_route():
 
     # Parse departure time
     departure = _get_ist_datetime(departure_time)
-    hour_of_day = departure.hour + departure.minute / 60.0
-    day_of_week = departure.weekday()
-    is_weekend = day_of_week >= 5
-    is_peak = _is_peak_hour(hour_of_day)
-    base_speed = _get_speed_for_time(hour_of_day, is_weekend)
 
     # Work on a copy so concurrent requests don't clash
     G = GRAPH.copy()
 
-    mode_label = "TomTom Live Traffic" if mode == "live" else (ML_MODEL_NAME or "Heuristic")
-    fallback_triggered = False
+    # ── THREAD-SAFE: Snapshot edge_counters under lock (Spec §2) ─────
+    # This prevents data races when multiple Flask threads compute
+    # routes concurrently while navigation sessions modify counters.
+    with _fleet_lock:
+        counter_snapshot = dict(edge_counters)
 
-    # ── Assign Weights based on Mode ─────────────────────────────
-    for u, v, data in G.edges(data=True):
-        dist_km = data.get("distance_km", 1.0)
-        predicted_time = -1.0
-        
-        # Try TomTom first if mode is live
-        if mode == "live":
-            u_data = G.nodes[u]
-            v_data = G.nodes[v]
-            mid_lat = (u_data["lat"] + v_data["lat"]) / 2
-            mid_lng = (u_data["lng"] + v_data["lng"]) / 2
-            result = _query_tomtom_speed(mid_lat, mid_lng)
-            
-            if result is not None:
-                speed, _ = result
-                predicted_time = (dist_km / speed) * 60.0
-            else:
-                fallback_triggered = True
+    # ── Determine if live API should be used (Spec §1) ───────────────
+    # USE_LIVE_API is the master toggle. mode="live" from the frontend
+    # is only honored when the toggle is True. When False, all routing
+    # defaults to the trained HistGradientBoostingRegressor model.
+    use_live = USE_LIVE_API and (mode == "live")
 
-        # Fallback to ML / Heuristic
-        if predicted_time < 0:
-            predicted_time = _predict_edge_travel_time(
-                u, v, dist_km, hour_of_day, day_of_week, is_peak, base_speed
-            )
-            # Deterministic per-edge variation for realism in predictive mode
-            edge_hash = hash((u, v)) % 10000 / 10000.0
-            variation = 0.90 + edge_hash * 0.20  # 0.90 – 1.10
-            predicted_time *= variation
+    # ── Unified weight computation pipeline ──────────────────────────
+    # compute_weighted_graph() handles the entire pipeline in one loop:
+    #   1. ML predicted_time for each edge (Historic Core)
+    #   2. Optional TomTom live override (if use_live=True)
+    #   3. Fleet fusion: final_weight = predicted_time * (1.15 ** fleet_count)
+    #   4. Assignment of final_weight to edge['weight']
+    mode_label, fallback_triggered = compute_weighted_graph(
+        graph=G,
+        departure=departure,
+        ml_model=ML_MODEL,
+        model_feature_names=_MODEL_FEATURE_NAMES,
+        edge_counter_snapshot=counter_snapshot,
+        use_live_api=use_live,
+        tomtom_api_key=TOMTOM_API_KEY,
+    )
 
-        # ── Fleet congestion penalty ─────────────────────────────
-        fleet_count = edge_counters.get((u, v), 0) + edge_counters.get((v, u), 0)
-        if fleet_count > 0:
-            predicted_time = predicted_time * (1.15 ** fleet_count)
-
-        data["weight"] = round(max(0.3, predicted_time), 2)
-
-    if fallback_triggered and mode == "live":
-        mode_label = f"Live Fallback to {ML_MODEL_NAME or 'Heuristic'}"
-
-    # ── Dijkstra shortest path ───────────────────────────────────
-    path, total_distance_km, total_time_min = _compute_route(G, source, destination)
+    # ── Dijkstra shortest path (Spec §3) ─────────────────────────────
+    # nx.dijkstra_path(G, source, target, weight='weight') strictly uses
+    # the final_weight computed above to determine the optimal route.
+    # The optimal path array is returned for the /api/start_trip lock-in.
+    path, total_distance_km, total_time_min = find_optimal_route(
+        G, source, destination
+    )
 
     if path is None:
         return jsonify({"error": "No valid route found between these points."}), 404
 
-    # ── Build per-edge segments with congestion colors ───────────
+    # ── Build per-edge segments with congestion colors ───────────────
     segments = []
     total_time_recalc = 0.0
     total_dist_recalc = 0.0
@@ -606,10 +378,12 @@ def predict_route():
             travel_time_min=total_time_final,
             estimated_cost_inr=estimated_cost_inr,
             path_taken=path,
-            fallback_triggered=(ML_MODEL is None),
+            fallback_triggered=fallback_triggered,
         )
     except Exception:
         pass  # never crash the API
+
+    hour_of_day = departure.hour + departure.minute / 60.0
 
     return jsonify({
         "path": path,
@@ -617,9 +391,9 @@ def predict_route():
         "total_distance_km": total_dist_final,
         "travel_time_min": total_time_final,
         "estimated_cost_inr": estimated_cost_inr,
-        "model_name": mode_label,  # Use mode_label instead of hardcoded ML_MODEL_NAME
+        "model_name": mode_label,
         "departure": departure.isoformat(),
-        "is_peak": bool(is_peak),
+        "is_peak": bool(is_peak_hour(hour_of_day)),
     })
 
 
@@ -651,30 +425,30 @@ def get_route():
 
     # Work on a copy so concurrent requests don't clash
     G = GRAPH.copy()
+    departure = _get_ist_datetime(departure_time)
 
-    # ── Assign weights based on mode ──────────────────────────────
-    fallback_triggered = False
-    mode_label = ""
+    # ── THREAD-SAFE: Snapshot edge_counters under lock (Spec §2) ─────
+    with _fleet_lock:
+        counter_snapshot = dict(edge_counters)
 
-    if mode == "live":
-        fallback_triggered, mode_label = _assign_live_weights(G)
-        # If all TomTom calls failed, fall back to ML predictive
-        if fallback_triggered and ML_MODEL is not None:
-            departure = _get_ist_datetime(departure_time)
-            _, mode_label = _assign_predictive_weights(G, departure)
-            mode_label = "ML Fallback Active"
-    else:
-        departure = _get_ist_datetime(departure_time)
-        fallback_triggered, mode_label = _assign_predictive_weights(G, departure)
+    # ── Determine if live API should be used (Spec §1) ───────────────
+    use_live = USE_LIVE_API and (mode == "live")
 
-    # ── Fleet congestion penalty (anti-herding) ───────────────────
-    for u, v, edata in G.edges(data=True):
-        fleet_count = edge_counters.get((u, v), 0) + edge_counters.get((v, u), 0)
-        if fleet_count > 0:
-            edata["weight"] = round(edata["weight"] * (1.15 ** fleet_count), 2)
+    # ── Unified weight computation + fleet fusion ────────────────────
+    mode_label, fallback_triggered = compute_weighted_graph(
+        graph=G,
+        departure=departure,
+        ml_model=ML_MODEL,
+        model_feature_names=_MODEL_FEATURE_NAMES,
+        edge_counter_snapshot=counter_snapshot,
+        use_live_api=use_live,
+        tomtom_api_key=TOMTOM_API_KEY,
+    )
 
-    # ── Dijkstra pathfinding ──────────────────────────────────────
-    path, total_distance_km, travel_time_min = _compute_route(G, source, destination)
+    # ── Dijkstra pathfinding (Spec §3) ───────────────────────────────
+    path, total_distance_km, travel_time_min = find_optimal_route(
+        G, source, destination
+    )
 
     if path is None:
         return jsonify({"error": "No valid route found between these points."}), 404
@@ -736,95 +510,61 @@ def get_route():
 
 
 # =====================================================================
-# FLEET ROUTING ENDPOINTS
+# FLEET ROUTING ENDPOINTS (Spec §4 + §5)
 # =====================================================================
-
-def _haversine(lat1, lng1, lat2, lng2):
-    """Return distance in meters between two lat/lng points."""
-    R = 6_371_000  # Earth radius in meters
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lng2 - lng1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-
-def _point_to_segment_dist(lat, lng, lat1, lng1, lat2, lng2):
-    """
-    Calculate shortest distance in meters from point (lat, lng) to line segment 
-    (lat1, lng1)-(lat2, lng2) using an equirectangular projection approximation.
-    """
-    R = 6371000 # meters
-    lat, lng, lat1, lng1, lat2, lng2 = map(math.radians, [lat, lng, lat1, lng1, lat2, lng2])
-    cos_lat = math.cos((lat1 + lat2) / 2.0)
-    
-    x, y = lng * cos_lat, lat
-    x1, y1 = lng1 * cos_lat, lat1
-    x2, y2 = lng2 * cos_lat, lat2
-    
-    dx, dy = x2 - x1, y2 - y1
-    length_sq = dx*dx + dy*dy
-    
-    if length_sq == 0:
-        return _haversine(math.degrees(lat), math.degrees(lng), math.degrees(lat1), math.degrees(lng1))
-        
-    t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length_sq))
-    return math.hypot(x - (x1 + t * dx), y - (y1 + t * dy)) * R
-
-
-def _update_session_edges(session_id: str, new_edges: list = None):
-    """
-    Unified helper to update a session's edge counters. Thread-safe.
-    Pass new_edges (list of edge tuples) to register, or None to end trip.
-    """
-    with _fleet_lock:
-        session = active_sessions.get(session_id, {})
-        old_edges = session.get("assigned_edges", [])
-        
-        for edge in old_edges:
-            key = tuple(edge)
-            edge_counters[key] = max(0, edge_counters.get(key, 0) - 1)
-            if edge_counters[key] == 0:
-                edge_counters.pop(key, None)
-                
-        if not new_edges:
-            active_sessions.pop(session_id, None)
-            return len(old_edges)
-            
-        for edge in new_edges:
-            key = tuple(edge)
-            edge_counters[key] = edge_counters.get(key, 0) + 1
-            
-        if session_id not in active_sessions:
-            active_sessions[session_id] = {"registered_at": _time.time()}
-            
-        active_sessions[session_id]["assigned_edges"] = new_edges
-        active_sessions[session_id]["last_seen"] = _time.time()
-        return len(new_edges)
-
 
 @app.route("/api/start_trip", methods=["POST"])
 def start_trip():
+    """
+    Start Trip (Spec §4):
+    - Server generates a UUID session_id
+    - Acquires the lock
+    - Appends the session_id to active_sessions
+    - Strictly increments edge_counters only for the edges in the chosen path
+    - Stores destination coordinates for backend proximity check
+    """
     payload = request.json or {}
-    session_id = payload.get("session_id", "").strip()
     path = payload.get("path", [])
 
-    if not session_id or len(path) < 2:
-        return jsonify({"error": "session_id and a path with ≥2 nodes are required."}), 400
+    if len(path) < 2:
+        return jsonify({"error": "A path with >=2 nodes is required."}), 400
+
+    # ── Server generates the UUID session_id (Spec §4) ────────────
+    # The client does NOT send session_id — it receives the server-generated
+    # one in the response and uses it for all subsequent telemetry/end_trip calls.
+    session_id = f"ses-{uuid.uuid4()}"
 
     edges = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
+
+    # Acquire lock, increment edge_counters for chosen path, register session
     edges_tracked = _update_session_edges(session_id, edges)
+
+    # ── Store destination coordinates for telemetry proximity check (Spec §5f) ──
+    # The /api/telemetry endpoint will use these to detect arrival (< 50m).
+    dest_node = path[-1]
+    dest_data = GRAPH.nodes.get(dest_node, {})
+    with _fleet_lock:
+        active_sessions[session_id]["dest_lat"] = dest_data.get("lat")
+        active_sessions[session_id]["dest_lng"] = dest_data.get("lng")
+        active_sessions[session_id]["path"] = path
 
     print(f"[START_TRIP] Registered: session={session_id!r}, edges_tracked={edges_tracked}")
     return jsonify({
         "status": "registered",
-        "session_id": session_id,
+        "session_id": session_id,   # Client must use this for telemetry & end_trip
         "edges_tracked": edges_tracked,
     })
 
 
 @app.route("/api/end_trip", methods=["POST"])
 def end_trip():
+    """
+    End Trip (Spec §4):
+    - Acquires the lock
+    - Decrements edge_counters for this session_id's path
+    - Deletes the session
+    - Zero global resets allowed — only per-session cleanup
+    """
     payload = request.json or {}
     session_id = payload.get("session_id", "").strip()
     reason = payload.get("reason", "unknown")
@@ -849,6 +589,21 @@ def end_trip():
 
 @app.route("/api/telemetry", methods=["POST"])
 def telemetry():
+    """
+    Telemetry endpoint (Spec §5d-5f):
+
+    Backend Snapping (Cross-Track Math):
+      Calculates the perpendicular equirectangular distance from the
+      raw GPS ping to the mathematical line segment of the active route.
+
+    Stop Conditions:
+      - If distance to final destination < 50 meters:
+          Auto-terminate, release session, return {"status": "arrived"}
+      - If cross-track deviation > 100 meters:
+          Release session, return {"status": "deviated"}
+      - Otherwise:
+          Return {"status": "on_track"}
+    """
     payload = request.json or {}
     session_id = payload.get("session_id", "").strip()
     lat = payload.get("lat")
@@ -863,8 +618,25 @@ def telemetry():
         if not session:
             return jsonify({"status": "no_session"}), 404
         edges = list(session.get("assigned_edges", []))
+        dest_lat = session.get("dest_lat")
+        dest_lng = session.get("dest_lng")
         session["last_seen"] = _time.time()
-        
+
+    # ── Stop Condition: Destination Reached (< 50 meters) (Spec §5f) ──
+    # Check BEFORE deviation so arriving drivers aren't flagged as deviated
+    # when they're simply at the destination but off the last edge segment.
+    if dest_lat is not None and dest_lng is not None:
+        dist_to_dest = _haversine(lat, lng, dest_lat, dest_lng)
+        if dist_to_dest < 50:
+            # Auto-terminate: release edge slots and clean up session
+            _update_session_edges(session_id, None)
+            print(f"[TELEMETRY] ARRIVED: session={session_id!r}, dist={dist_to_dest:.0f}m")
+            return jsonify({
+                "status": "arrived",
+                "distance_to_dest_m": round(dist_to_dest),
+            })
+
+    # ── Stop Condition: Cross-Track Deviation (> 100 meters) (Spec §5d-5e) ──
     DEVIATION_THRESHOLD_M = 100
     on_route = False
 
@@ -877,7 +649,7 @@ def telemetry():
         u_lat, u_lng = u_node.get("lat", 0), u_node.get("lng", 0)
         v_lat, v_lng = v_node.get("lat", 0), v_node.get("lng", 0)
 
-        # Calculates distance to the segment line, not just the sparse endpoints
+        # Calculates perpendicular equirectangular distance to the segment line
         dist = _point_to_segment_dist(lat, lng, u_lat, u_lng, v_lat, v_lng)
         
         if dist <= DEVIATION_THRESHOLD_M:
@@ -887,6 +659,7 @@ def telemetry():
     if on_route:
         return jsonify({"status": "on_track"})
 
+    # Deviation > 100m: release edge slots and return deviated status
     _update_session_edges(session_id, None)
     print(f"[TELEMETRY] DEVIATED: session={session_id!r}")
     return jsonify({"status": "deviated"})
