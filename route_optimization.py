@@ -111,8 +111,9 @@ def _query_tomtom_speed(lat: float, lng: float, api_key: str):
         free_flow = flow.get("freeFlowSpeed", speed)
         if speed and speed > 0:
             return (float(speed), float(free_flow) if free_flow else float(speed))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[TOMTOM FALLBACK] API timeout or key failure: {e}. Falling back to ML.")
+        return None
     return None
 
 

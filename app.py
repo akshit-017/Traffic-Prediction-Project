@@ -214,6 +214,24 @@ def _update_session_edges(session_id: str, new_edges: list = None):
         return len(new_edges)
 
 
+# ── Background Stale Session Cleanup ─────────────────────────────────
+def _cleanup_stale_sessions_worker():
+    """Background daemon to clear out ghost users over 600s old."""
+    while True:
+        _time.sleep(60)
+        with _fleet_lock:
+            now = _time.time()
+            stale_ids = [
+                sid for sid, sdata in active_sessions.items()
+                if now - sdata.get("last_seen", now) > 600
+            ]
+        for sid in stale_ids:
+            _update_session_edges(sid, None)
+            print(f"[FLEET] Auto-cleaned ghost session: {sid}")
+
+threading.Thread(target=_cleanup_stale_sessions_worker, daemon=True).start()
+
+
 # =====================================================================
 # ROUTES
 # =====================================================================
@@ -380,8 +398,8 @@ def predict_route():
             path_taken=path,
             fallback_triggered=fallback_triggered,
         )
-    except Exception:
-        pass  # never crash the API
+    except Exception as e:
+        print(f"[MySQL FALLBACK] Database offline. Route returned to user. Error: {e}")
 
     hour_of_day = departure.hour + departure.minute / 60.0
 
@@ -489,8 +507,8 @@ def get_route():
             path_taken=path,
             fallback_triggered=fallback_triggered,
         )
-    except Exception:
-        pass  # never crash the API
+    except Exception as e:
+        print(f"[MySQL FALLBACK] Database offline. Route returned to user. Error: {e}")
 
     # ── Response ──────────────────────────────────────────────────
     return jsonify({
