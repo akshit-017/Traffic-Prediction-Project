@@ -845,6 +845,7 @@ function stopNavigation(reason = 'cancelled') {
     }
 
     resetNavUI();
+    sessionStorage.removeItem('active_session_id');
 }
 
 /**
@@ -907,8 +908,23 @@ async function startNavigation() {
         }
     }
 
-    // 2. Assign a fresh session ID for this new navigation trip.
+    // 2. Lifecycle & Stale Overwrite
+    const oldSession = sessionStorage.getItem('active_session_id');
+    if (oldSession) {
+        console.log('[FLEET] Cleaning up stale session before starting new one:', oldSession);
+        try {
+            await fetch("/api/end_trip", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: oldSession, reason: 'overwritten' }),
+            });
+        } catch (e) {
+            console.warn('[FLEET] Stale session cleanup failed:', e);
+        }
+    }
+
     SESSION_ID = _generateSessionId();
+    sessionStorage.setItem('active_session_id', SESSION_ID);
     console.log('[FLEET] New trip session ID:', SESSION_ID);
 
     // 3. Store destination coordinates for proximity-based stop condition
@@ -1117,13 +1133,8 @@ async function onGPSPosition(position) {
  */
 function onGPSError(error) {
     console.warn(`[FLEET] GPS error (code=${error.code}): ${error.message}`);
-    if (error.code === error.TIMEOUT) {
-        telemetryText.textContent = "GPS signal lost \u2014 retrying\u2026";
-    } else if (error.code === error.PERMISSION_DENIED) {
-        alert("Location permission denied. Navigation requires GPS access.");
-        stopNavigation('cancelled');
-    }
-    // POSITION_UNAVAILABLE: watchPosition will automatically retry
+    alert("GPS signal is unavailable. Navigation stopped.");
+    stopNavigation('cancelled');
 }
 
 /**
@@ -1283,4 +1294,12 @@ btnWrongTurn.addEventListener("click", () => {
     if (!isNavigating) return;
     simulateDeviation = true;
     console.log("[FLEET] Wrong turn simulation queued \u2014 will deviate on next GPS fix.");
+});
+
+window.addEventListener('beforeunload', () => {
+    const activeSession = sessionStorage.getItem('active_session_id');
+    if (activeSession) {
+        const payload = JSON.stringify({ session_id: activeSession, reason: 'page_unload' });
+        navigator.sendBeacon('/api/end_trip', payload);
+    }
 });

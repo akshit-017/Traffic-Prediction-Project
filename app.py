@@ -216,14 +216,14 @@ def _update_session_edges(session_id: str, new_edges: list = None):
 
 # ── Background Stale Session Cleanup ─────────────────────────────────
 def _cleanup_stale_sessions_worker():
-    """Background daemon to clear out ghost users over 600s old."""
+    """Background daemon to clear out ghost users over 60s old."""
     while True:
         _time.sleep(60)
         with _fleet_lock:
             now = _time.time()
             stale_ids = [
                 sid for sid, sdata in active_sessions.items()
-                if now - sdata.get("last_seen", now) > 600
+                if now - sdata.get("last_seen", now) > 60
             ]
         for sid in stale_ids:
             _update_session_edges(sid, None)
@@ -235,6 +235,16 @@ threading.Thread(target=_cleanup_stale_sessions_worker, daemon=True).start()
 # =====================================================================
 # ROUTES
 # =====================================================================
+
+@app.route("/api/reset_fleet", methods=["POST"])
+def reset_fleet():
+    """Development helper to forcefully clear all active sessions and reset edge counters to 0."""
+    with _fleet_lock:
+        active_sessions.clear()
+        for key in list(edge_counters.keys()):
+            edge_counters[key] = 0
+    print("[FLEET] Manual fleet reset complete.")
+    return jsonify({"status": "fleet_reset_complete"})
 
 @app.route("/")
 def index():
@@ -692,8 +702,15 @@ def telemetry():
 
     # Deviation > 100m: release edge slots and return deviated status
     _update_session_edges(session_id, None)
+    
+    with _fleet_lock:
+        active_sessions.pop(session_id, None)
+
     print(f"[TELEMETRY] DEVIATED: session={session_id!r}")
-    return jsonify({"status": "deviated"})
+    return jsonify({
+        "status": "deviated",
+        "message": "Vehicle deviated from route. Session released."
+    })
 
 
 @app.route("/api/fleet_status", methods=["GET"])
