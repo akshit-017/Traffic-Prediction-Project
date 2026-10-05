@@ -882,15 +882,40 @@ async function startNavigation() {
         return;
     }
 
-    // 1. Assign a fresh session ID for this new navigation trip.
+    // 0. Acquire Wake Lock immediately to preserve user gesture
+    await acquireWakeLock();
+
+    // 1. Request GPS permission explicitly before registering trip
+    let hasGps = false;
+    if ('geolocation' in navigator) {
+        try {
+            await new Promise((resolve, reject) => {
+                navigator.geolocation.getCurrentPosition(resolve, reject, {
+                    enableHighAccuracy: true,
+                    maximumAge: 0,
+                    timeout: 10000
+                });
+            });
+            hasGps = true;
+        } catch (error) {
+            console.warn(`[FLEET] Initial GPS request failed (code=${error.code}): ${error.message}`);
+            if (error.code === 1 || error.code === error.PERMISSION_DENIED) {
+                alert("Location permission denied. Navigation requires GPS access.");
+                stopNavigation('cancelled');
+                return;
+            }
+        }
+    }
+
+    // 2. Assign a fresh session ID for this new navigation trip.
     SESSION_ID = _generateSessionId();
     console.log('[FLEET] New trip session ID:', SESSION_ID);
 
-    // 2. Store destination coordinates for proximity-based stop condition
+    // 3. Store destination coordinates for proximity-based stop condition
     destinationCoords = routePolylineCoords[routePolylineCoords.length - 1];
     console.log(`[FLEET] Destination coords: [${destinationCoords[0].toFixed(4)}, ${destinationCoords[1].toFixed(4)}]`);
 
-    // 3. Register the trip on the backend
+    // 4. Register the trip on the backend
     try {
         const tripRes = await fetch("/api/start_trip", {
             method: "POST",
@@ -908,7 +933,7 @@ async function startNavigation() {
         return;
     }
 
-    // 4. Set navigation state
+    // 5. Set navigation state
     isNavigating = true;
     carStepIndex = 0;
     simulateDeviation = false;
@@ -934,9 +959,6 @@ async function startNavigation() {
     telemetryStatus.classList.remove("deviated");
     telemetryStatus.classList.add("on-track");
     telemetryText.textContent = "Acquiring GPS signal\u2026";
-
-    // 7. Acquire Wake Lock to keep screen on while driving
-    await acquireWakeLock();
 
     // 8. Start GPS tracking — real hardware or simulation fallback
     if ('geolocation' in navigator) {

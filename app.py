@@ -661,18 +661,31 @@ def telemetry():
     # 2. Edge Snapping fix: math done OUTSIDE the lock to prevent blocking
     for edge in edges:
         u_id, v_id = edge
-        u_node = GRAPH.nodes.get(u_id, {})
-        v_node = GRAPH.nodes.get(v_id, {})
+        edge_data = GRAPH.get_edge_data(u_id, v_id, default={})
+        road_coords = edge_data.get("road_coords")
 
-        u_lat, u_lng = u_node.get("lat", 0), u_node.get("lng", 0)
-        v_lat, v_lng = v_node.get("lat", 0), v_node.get("lng", 0)
+        if road_coords and len(road_coords) >= 2:
+            # Check distance against actual road polyline segments
+            for i in range(len(road_coords) - 1):
+                p1 = road_coords[i]
+                p2 = road_coords[i + 1]
+                dist = _point_to_segment_dist(lat, lng, p1[0], p1[1], p2[0], p2[1])
+                if dist <= DEVIATION_THRESHOLD_M:
+                    on_route = True
+                    break
+            if on_route:
+                break
+        else:
+            # Fallback to straight line between nodes
+            u_node = GRAPH.nodes.get(u_id, {})
+            v_node = GRAPH.nodes.get(v_id, {})
+            u_lat, u_lng = u_node.get("lat", 0), u_node.get("lng", 0)
+            v_lat, v_lng = v_node.get("lat", 0), v_node.get("lng", 0)
 
-        # Calculates perpendicular equirectangular distance to the segment line
-        dist = _point_to_segment_dist(lat, lng, u_lat, u_lng, v_lat, v_lng)
-        
-        if dist <= DEVIATION_THRESHOLD_M:
-            on_route = True
-            break
+            dist = _point_to_segment_dist(lat, lng, u_lat, u_lng, v_lat, v_lng)
+            if dist <= DEVIATION_THRESHOLD_M:
+                on_route = True
+                break
 
     if on_route:
         return jsonify({"status": "on_track"})
