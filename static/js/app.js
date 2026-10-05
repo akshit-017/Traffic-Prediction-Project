@@ -929,9 +929,9 @@ async function startNavigation(e) {
         }
     }
 
-    SESSION_ID = _generateSessionId();
-    sessionStorage.setItem('active_session_id', SESSION_ID);
-    console.log('[FLEET] New trip session ID:', SESSION_ID);
+    // We DO NOT generate SESSION_ID on the frontend anymore.
+    // The server will generate it and we will store it.
+    console.log('[FLEET] Requesting new trip session from backend...');
 
     // 3. Store destination coordinates for proximity-based stop condition
     destinationCoords = routePolylineCoords[routePolylineCoords.length - 1];
@@ -943,12 +943,18 @@ async function startNavigation(e) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                session_id: SESSION_ID,
-                path: lastRoutePath,
+                path: lastRoutePath, // Client does not send session_id
             }),
         });
         const tripData = await tripRes.json();
         console.log("[FLEET] Trip registered:", tripData);
+        
+        // 4b. Store the server-generated session_id
+        if (tripData.session_id) {
+            SESSION_ID = tripData.session_id;
+            sessionStorage.setItem('active_session_id', SESSION_ID);
+            console.log('[FLEET] Backend provided session ID:', SESSION_ID);
+        }
     } catch (err) {
         console.error("[FLEET] Failed to register trip:", err);
         alert("Could not register your trip. Please check your connection.");
@@ -1126,9 +1132,13 @@ async function onGPSPosition(position) {
                 fetch("/api/start_trip", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ session_id: SESSION_ID, path: lastRoutePath }),
+                    body: JSON.stringify({ path: lastRoutePath }), // Do not send session_id
                 }).then(r => r.json()).then(d => {
                     console.log("[FLEET] Auto re-register result:", d);
+                    if (d.session_id) {
+                        SESSION_ID = d.session_id;
+                        sessionStorage.setItem('active_session_id', SESSION_ID);
+                    }
                 }).catch(e => console.error("[FLEET] Re-register failed:", e));
             }
         }
@@ -1264,9 +1274,13 @@ async function simulationTick() {
                 fetch("/api/start_trip", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ session_id: SESSION_ID, path: lastRoutePath }),
+                    body: JSON.stringify({ path: lastRoutePath }), // Do not send session_id
                 }).then(r => r.json()).then(d => {
                     console.log("[FLEET] Auto re-register result:", d);
+                    if (d.session_id) {
+                        SESSION_ID = d.session_id;
+                        sessionStorage.setItem('active_session_id', SESSION_ID);
+                    }
                 }).catch(e => console.error("[FLEET] Re-register failed:", e));
             }
         }
