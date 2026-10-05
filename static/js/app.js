@@ -873,13 +873,18 @@ async function acquireWakeLock() {
  * Uses navigator.geolocation.watchPosition() for real hardware GPS.
  * Falls back to simulation if geolocation is unavailable.
  */
-async function startNavigation() {
+async function startNavigation(e) {
+    if (e) e.preventDefault();
+    btnStartNav.disabled = true;
+
     if (!lastRoutePath || lastRoutePath.length < 2) {
         console.warn("[FLEET] No route to navigate.");
+        btnStartNav.disabled = false;
         return;
     }
     if (routePolylineCoords.length < 2) {
         console.warn("[FLEET] No polyline coordinates for navigation.");
+        btnStartNav.disabled = false;
         return;
     }
 
@@ -903,20 +908,21 @@ async function startNavigation() {
             if (error.code === 1 || error.code === error.PERMISSION_DENIED) {
                 alert("Location permission denied. Navigation requires GPS access.");
                 stopNavigation('cancelled');
+                btnStartNav.disabled = false;
                 return;
             }
         }
     }
 
     // 2. Lifecycle & Stale Overwrite
-    const oldSession = sessionStorage.getItem('active_session_id');
-    if (oldSession) {
-        console.log('[FLEET] Cleaning up stale session before starting new one:', oldSession);
+    const currentSessionId = sessionStorage.getItem('active_session_id');
+    if (currentSessionId) {
+        console.log('[FLEET] Cleaning up stale session before starting new one:', currentSessionId);
         try {
             await fetch("/api/end_trip", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ session_id: oldSession, reason: 'overwritten' }),
+                body: JSON.stringify({ session_id: currentSessionId, reason: 'overwritten' }),
             });
         } catch (e) {
             console.warn('[FLEET] Stale session cleanup failed:', e);
@@ -946,6 +952,7 @@ async function startNavigation() {
     } catch (err) {
         console.error("[FLEET] Failed to register trip:", err);
         alert("Could not register your trip. Please check your connection.");
+        btnStartNav.disabled = false;
         return;
     }
 
@@ -975,6 +982,7 @@ async function startNavigation() {
     telemetryStatus.classList.remove("deviated");
     telemetryStatus.classList.add("on-track");
     telemetryText.textContent = "Acquiring GPS signal\u2026";
+    btnStartNav.disabled = false; // Re-enable after setup
 
     // 8. Start GPS tracking — real hardware or simulation fallback
     if ('geolocation' in navigator) {
@@ -985,7 +993,7 @@ async function startNavigation() {
             {
                 enableHighAccuracy: true, // Force physical GPS chip
                 maximumAge: 0,            // No cached positions
-                timeout: 10000,           // 10s timeout per fix
+                timeout: 5000,            // 5s timeout per fix
             }
         );
     } else {
@@ -1129,11 +1137,16 @@ async function onGPSPosition(position) {
     }
 }
 
-/**
- * Called by watchPosition() on GPS error.
- */
 function onGPSError(error) {
     console.warn(`[FLEET] GPS error (code=${error.code}): ${error.message}`);
+    
+    // 1. Immediately clear the watch
+    if (geoWatchId !== null) {
+        navigator.geolocation.clearWatch(geoWatchId);
+        geoWatchId = null;
+    }
+
+    // 2. Asynchronous POST /api/end_trip to delete ghost session
     const sid = sessionStorage.getItem('active_session_id') || SESSION_ID;
     if (sid) {
         fetch('/api/end_trip', {
@@ -1142,8 +1155,13 @@ function onGPSError(error) {
             body: JSON.stringify({ session_id: sid, reason: 'gps_error' }),
         }).catch(() => {});
     }
-    alert("Cannot get GPS signal. Route released.");
-    stopNavigation('cancelled');
+
+    // 3. Alert the user
+    alert("GPS signal lost or unavailable indoors. Route released.");
+
+    // 4. Reset the UI button state
+    resetNavUI();
+    btnStartNav.disabled = false;
 }
 
 /**
@@ -1294,11 +1312,11 @@ document.addEventListener('visibilitychange', async () => {
 });
 
 // ── Button Event Listeners ──────────────────────────────────────
-btnStartNav.addEventListener("click", () => {
+btnStartNav.addEventListener("click", async (e) => {
     if (isNavigating) {
         stopNavigation();
     } else {
-        startNavigation();
+        await startNavigation(e);
     }
 });
 

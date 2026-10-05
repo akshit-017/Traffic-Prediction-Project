@@ -218,7 +218,7 @@ def _update_session_edges(session_id: str, new_edges: list = None):
 def _cleanup_stale_sessions_worker():
     """Background daemon to clear out ghost users over 60s old."""
     while True:
-        _time.sleep(60)
+        _time.sleep(15)  # Check 4x a minute to strictly enforce the 60s failsafe
         with _fleet_lock:
             now = _time.time()
             stale_ids = [
@@ -348,6 +348,9 @@ def predict_route():
 
     if path is None:
         return jsonify({"error": "No valid route found between these points."}), 404
+
+    # Ensure strictly ordered list
+    path = list(path)
 
     # ── Build per-edge segments with congestion colors ───────────────
     segments = []
@@ -481,6 +484,9 @@ def get_route():
     if path is None:
         return jsonify({"error": "No valid route found between these points."}), 404
 
+    # Ensure strictly ordered list
+    path = list(path)
+
     # ── Cost estimation ───────────────────────────────────────────
     estimated_cost_inr = round((total_distance_km * 10) + (travel_time_min * 2))
 
@@ -556,6 +562,9 @@ def start_trip():
 
     if len(path) < 2:
         return jsonify({"error": "A path with >=2 nodes is required."}), 400
+
+    # Ensure strictly ordered list
+    path = list(path)
 
     # ── Server generates the UUID session_id (Spec §4) ────────────
     # The client does NOT send session_id — it receives the server-generated
