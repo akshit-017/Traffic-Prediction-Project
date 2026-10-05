@@ -700,23 +700,22 @@ def telemetry():
     if on_route:
         return jsonify({"status": "on_track"})
 
-    # Deviation > 100m: release edge slots and return deviated status
+    # Deviation > 100m: Instantly acquire _fleet_lock, release edges, pop session
     _update_session_edges(session_id, None)
-    
     with _fleet_lock:
         active_sessions.pop(session_id, None)
 
     print(f"[TELEMETRY] DEVIATED: session={session_id!r}")
     return jsonify({
         "status": "deviated",
-        "message": "Vehicle deviated from route. Session released."
+        "message": "Deviated by over 100m. Server auto-purged session."
     })
 
 
 @app.route("/api/fleet_status", methods=["GET"])
 def fleet_status():
     with _fleet_lock:
-        STALE_THRESHOLD = 600
+        STALE_THRESHOLD = 60
         now = _time.time()
         stale_ids = [
             sid for sid, sdata in active_sessions.items()

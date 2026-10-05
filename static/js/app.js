@@ -1098,16 +1098,17 @@ async function onGPSPosition(position) {
             telemetryText.textContent = `GPS active \u00b7 On track \u00b7 ${distToDest}m to dest`;
 
         } else if (data.status === "deviated") {
-            // ── Stop Condition 2: Backend says deviated ─────────────────
-            // Call stopNavigation which clears watch, releases wake lock, and fires /api/end_trip
-            stopNavigation('deviated');
+            if (geoWatchId !== null) {
+                navigator.geolocation.clearWatch(geoWatchId);
+                geoWatchId = null;
+            }
+            resetNavUI();
+            sessionStorage.removeItem('active_session_id');
 
-            // Re-show the deviation status since stopNavigation hides it
             telemetryStatus.classList.remove("hidden", "on-track");
             telemetryStatus.classList.add("deviated");
             telemetryText.textContent = "\u26a0 Deviation detected! Vehicle off-route";
 
-            // Alert the user and offer recalculation
             alert("You left the route. Recalculate?");
 
         } else if (data.status === "no_session") {
@@ -1133,7 +1134,15 @@ async function onGPSPosition(position) {
  */
 function onGPSError(error) {
     console.warn(`[FLEET] GPS error (code=${error.code}): ${error.message}`);
-    alert("GPS signal is unavailable. Navigation stopped.");
+    const sid = sessionStorage.getItem('active_session_id') || SESSION_ID;
+    if (sid) {
+        fetch('/api/end_trip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sid, reason: 'gps_error' }),
+        }).catch(() => {});
+    }
+    alert("Cannot get GPS signal. Route released.");
     stopNavigation('cancelled');
 }
 
@@ -1219,10 +1228,13 @@ async function simulationTick() {
             telemetryStatus.classList.add("on-track");
             telemetryText.textContent = `Telemetry active \u00b7 On track (step ${carStepIndex}/${routePolylineCoords.length - 1})`;
         } else if (data.status === "deviated") {
-            // Call stopNavigation which clears watch, releases wake lock, and fires /api/end_trip
-            stopNavigation('deviated');
+            if (telemetryInterval) {
+                clearInterval(telemetryInterval);
+                telemetryInterval = null;
+            }
+            resetNavUI();
+            sessionStorage.removeItem('active_session_id');
 
-            // Re-show the deviation status since stopNavigation hides it
             telemetryStatus.classList.remove("hidden", "on-track");
             telemetryStatus.classList.add("deviated");
             telemetryText.textContent = "\u26a0 Deviation detected! Vehicle off-route";
