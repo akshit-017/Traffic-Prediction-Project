@@ -893,23 +893,29 @@ async function startNavigation(e) {
     let hasGps = false;
     let initialPosition = null;
     if ('geolocation' in navigator) {
-        try {
-            initialPosition = await new Promise((resolve, reject) => {
-                navigator.geolocation.getCurrentPosition(resolve, reject, {
-                    enableHighAccuracy: true,
-                    maximumAge: 0,
-                    timeout: 10000
+        const userAgreed = window.confirm("Do you want to share your location to start real-time navigation?");
+        if (userAgreed) {
+            try {
+                initialPosition = await new Promise((resolve, reject) => {
+                    navigator.geolocation.getCurrentPosition(resolve, reject, {
+                        enableHighAccuracy: true,
+                        maximumAge: 0,
+                        timeout: 10000
+                    });
                 });
-            });
-            hasGps = true;
-        } catch (error) {
-            console.warn(`[FLEET] Initial GPS request failed (code=${error.code}): ${error.message}`);
-            if (error.code === 1 || error.code === error.PERMISSION_DENIED) {
-                alert("Location permission denied. Navigation requires GPS access.");
-                stopNavigation('cancelled');
-                btnStartNav.disabled = false;
-                return;
+                hasGps = true;
+            } catch (error) {
+                console.warn(`[FLEET] Initial GPS request failed (code=${error.code}): ${error.message}`);
+                if (error.code === 1 || error.code === error.PERMISSION_DENIED) {
+                    alert("Location permission denied. Navigation requires GPS access.");
+                    stopNavigation('cancelled');
+                    btnStartNav.disabled = false;
+                    return;
+                }
             }
+        } else {
+            console.log("[FLEET] User declined location access.");
+            // If they decline, we just use the start of the route
         }
     }
 
@@ -993,7 +999,7 @@ async function startNavigation(e) {
     btnStartNav.disabled = false; // Re-enable after setup
 
     // 8. Start GPS tracking — real hardware or simulation fallback
-    if ('geolocation' in navigator) {
+    if (hasGps) {
         console.log('[FLEET] Starting hardware GPS tracking via watchPosition().');
         geoWatchId = navigator.geolocation.watchPosition(
             onGPSPosition,
