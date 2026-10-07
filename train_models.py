@@ -271,6 +271,9 @@ def train_and_compare(preprocessor, X: pd.DataFrame, y: pd.Series):
         results[name] = {"rmse": rmse, "r2": r2}
         print(f"   RMSE = {rmse:.4f}  |  R² = {r2:.4f}")
 
+        if name == "Random Forest":
+            best_rf_pipeline = pipe
+
         if r2 > best_score:
             best_score = r2
             best_name = name
@@ -283,6 +286,11 @@ def train_and_compare(preprocessor, X: pd.DataFrame, y: pd.Series):
                 best_pipeline.fit(X_tr, y_tr)  # keep sampled fit for consistency
             else:
                 best_pipeline = pipe
+
+    # Force the return of the Random Forest model
+    print(f"\n[!] Overriding model selection to forcefully use Random Forest as requested.")
+    best_name = "Random Forest"
+    best_pipeline = best_rf_pipeline
 
     return best_pipeline, best_name, results
 
