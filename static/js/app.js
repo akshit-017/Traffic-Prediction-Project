@@ -84,7 +84,6 @@ const errorMsg         = document.getElementById("error-msg");
 const resultsDashboard = document.getElementById("results-dashboard");
 const metricTime       = document.getElementById("metric-time");
 const metricDistance    = document.getElementById("metric-distance");
-const metricCost       = document.getElementById("metric-cost");
 const routePath        = document.getElementById("route-path");
 const sourceBadge      = document.getElementById("source-badge");
 
@@ -462,7 +461,6 @@ btnRoute.addEventListener("click", async () => {
         // Update dashboard metrics
         metricTime.textContent = formatTime(data.travel_time_min);
         metricDistance.textContent = `${data.total_distance_km} km`;
-        metricCost.textContent = `\u20B9${data.estimated_cost_inr}`;
 
         // Route path with colored node pills
         const path = data.path || [];
@@ -893,9 +891,10 @@ async function startNavigation(e) {
 
     // 1. Request GPS permission explicitly before registering trip
     let hasGps = false;
+    let initialPosition = null;
     if ('geolocation' in navigator) {
         try {
-            await new Promise((resolve, reject) => {
+            initialPosition = await new Promise((resolve, reject) => {
                 navigator.geolocation.getCurrentPosition(resolve, reject, {
                     enableHighAccuracy: true,
                     maximumAge: 0,
@@ -967,8 +966,11 @@ async function startNavigation(e) {
     carStepIndex = 0;
     simulateDeviation = false;
 
-    // 5. Place the car marker at the start of the route
-    const startPos = routePolylineCoords[0];
+    // 5. Place the car marker at the start of the route or user's location
+    let startPos = routePolylineCoords[0];
+    if (initialPosition) {
+        startPos = [initialPosition.coords.latitude, initialPosition.coords.longitude];
+    }
     const carIcon = L.divIcon({
         className: "car-marker-icon",
         iconSize: [16, 16],
